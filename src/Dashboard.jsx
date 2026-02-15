@@ -405,12 +405,52 @@ export default function Dashboard() {
   };
 
   // ─── Calendar/Scheduling Functions ───
+  const regenerateSchedule = (settingsToUse = scheduleSettings) => {
+    const activeClients = scheduleClients.filter(c => c.status === "active");
+    if (activeClients.length === 0) {
+      showToast("⚠️ No active clients to schedule");
+      return;
+    }
+    
+    // Get current 2-week window
+    const today = new Date();
+    const day = today.getDay();
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - day + (day === 0 ? -6 : 1));
+    
+    const twoWeeksLater = new Date(monday);
+    twoWeeksLater.setDate(monday.getDate() + 13);
+    
+    // Regenerate jobs
+    const newJobs = generateScheduleForClients(
+      activeClients,
+      monday.toISOString().split("T")[0],
+      twoWeeksLater.toISOString().split("T")[0],
+      settingsToUse
+    );
+    
+    // Keep non-demo manual jobs, replace demo/generated jobs
+    const manualJobs = scheduledJobs.filter(j => !j.isDemo && !j.isBreak);
+    setScheduledJobs([...manualJobs, ...newJobs]);
+    
+    showToast(`✅ Regenerated schedule: ${newJobs.filter(j => !j.isBreak).length} jobs scheduled`);
+  };
+
   const loadDemoData = () => {
     const demoClients = generateDemoClients(45);
     
-    // Calculate durations
+    // Calculate durations and assign days based on suburb
     demoClients.forEach(c => {
       c.estimatedDuration = calculateDuration(c, scheduleSettings);
+      
+      // Assign preferred day based on suburb and area schedule
+      const suburbLower = c.suburb.toLowerCase();
+      for (const [day, suburbs] of Object.entries(scheduleSettings.areaSchedule)) {
+        if (suburbs.some(s => s.toLowerCase() === suburbLower)) {
+          c.preferredDay = day;
+          break;
+        }
+      }
     });
     
     // Generate 2 weeks of schedules
@@ -431,7 +471,7 @@ export default function Dashboard() {
     
     setScheduleClients(prev => [...prev.filter(c => !c.isDemo), ...demoClients]);
     setScheduledJobs(prev => [...prev.filter(j => !j.isDemo), ...demoJobs]);
-    showToast(`✅ Loaded ${demoClients.length} demo clients with ${demoJobs.length} scheduled jobs`);
+    showToast(`✅ Loaded ${demoClients.length} demo clients with ${demoJobs.filter(j => !j.isBreak).length} scheduled jobs`);
   };
 
   const wipeDemo = () => {
@@ -848,6 +888,11 @@ export default function Dashboard() {
                 </p>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {scheduleClients.length > 0 && (
+                  <button onClick={() => regenerateSchedule()} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.blue}`, background: T.blueLight, fontSize: 12, fontWeight: 700, color: T.blue, cursor: "pointer" }}>
+                    🔄 Regenerate
+                  </button>
+                )}
                 <button onClick={() => setShowScheduleSettings(true)} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
                   ⚙️ Settings
                 </button>
@@ -947,24 +992,35 @@ export default function Dashboard() {
                                   {teamJobs.map(job => (
                                     <div
                                       key={job.id}
-                                      onClick={() => setEditingJob(job)}
+                                      onClick={() => !job.isBreak && setEditingJob(job)}
                                       style={{
                                         padding: "8px 10px",
-                                        background: job.status === "completed" ? "#D4EDDA" : `${team.color}15`,
-                                        borderLeft: `3px solid ${team.color}`,
+                                        background: job.isBreak 
+                                          ? T.accentLight 
+                                          : job.status === "completed" 
+                                            ? "#D4EDDA" 
+                                            : `${team.color}15`,
+                                        borderLeft: job.isBreak 
+                                          ? `3px solid ${T.accent}` 
+                                          : `3px solid ${team.color}`,
                                         borderRadius: "0 6px 6px 0",
-                                        cursor: "pointer",
+                                        cursor: job.isBreak ? "default" : "pointer",
                                         transition: "all 0.15s",
                                       }}
                                     >
-                                      <div style={{ fontWeight: 700, fontSize: 12, color: T.text, marginBottom: 2 }}>{job.clientName}</div>
+                                      <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2 }}>
+                                        {job.isBreak ? "🍴 Lunch Break" : job.clientName}
+                                      </div>
                                       <div style={{ fontSize: 10, color: T.textMuted }}>
                                         {job.startTime} - {job.endTime}
+                                        {!job.isBreak && <span> ({job.duration} mins)</span>}
                                       </div>
-                                      <div style={{ fontSize: 10, color: T.textMuted, display: "flex", alignItems: "center", gap: 4 }}>
-                                        📍 {job.suburb}
-                                        {job.status === "completed" && <span style={{ color: "#155724" }}>✓</span>}
-                                      </div>
+                                      {!job.isBreak && (
+                                        <div style={{ fontSize: 10, color: T.textMuted, display: "flex", alignItems: "center", gap: 4 }}>
+                                          📍 {job.suburb}
+                                          {job.status === "completed" && <span style={{ color: "#155724" }}>✓</span>}
+                                        </div>
+                                      )}
                                     </div>
                                   ))}
                                 </div>
@@ -1384,7 +1440,17 @@ export default function Dashboard() {
       {showScheduleSettings && (
         <ScheduleSettingsModal
           settings={scheduleSettings}
-          onSave={(updated) => { setScheduleSettings(updated); setShowScheduleSettings(false); showToast("✅ Settings saved"); }}
+          onSave={(updated) => { 
+            setScheduleSettings(updated); 
+            setShowScheduleSettings(false); 
+            showToast("✅ Settings saved"); 
+          }}
+          onSaveAndRegenerate={(updated) => {
+            setScheduleSettings(updated);
+            setShowScheduleSettings(false);
+            // Use setTimeout to ensure state is updated before regenerating
+            setTimeout(() => regenerateSchedule(updated), 100);
+          }}
           onClose={() => setShowScheduleSettings(false)}
         />
       )}
@@ -1815,7 +1881,7 @@ function QuotePreviewInline({ quote, pricing }) {
 }
 
 // ─── Schedule Settings Modal ───
-function ScheduleSettingsModal({ settings, onSave, onClose }) {
+function ScheduleSettingsModal({ settings, onSave, onSaveAndRegenerate, onClose }) {
   const [local, setLocal] = useState({ ...settings });
   const u = (path, value) => {
     const keys = path.split(".");
@@ -1915,6 +1981,7 @@ function ScheduleSettingsModal({ settings, onSave, onClose }) {
         {/* Area Schedule */}
         <div>
           <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Area Schedule (suburbs per day)</label>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: T.textMuted }}>Clients will be auto-assigned to days based on their suburb</p>
           {["monday", "tuesday", "wednesday", "thursday", "friday"].map(day => (
             <div key={day} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
               <div style={{ width: 80, fontSize: 13, fontWeight: 600, color: T.text, textTransform: "capitalize" }}>{day}</div>
@@ -1932,9 +1999,19 @@ function ScheduleSettingsModal({ settings, onSave, onClose }) {
           ))}
         </div>
 
-        <button onClick={() => onSave(local)} style={{ width: "100%", padding: "14px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
-          Save Settings
-        </button>
+        {/* Action Buttons */}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => onSave(local)} style={{ flex: 1, padding: "14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", color: T.textMuted, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+            Save Only
+          </button>
+          <button onClick={() => onSaveAndRegenerate(local)} style={{ flex: 2, padding: "14px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+            💫 Save & Regenerate Schedule
+          </button>
+        </div>
+        
+        <p style={{ margin: 0, fontSize: 11, color: T.textMuted, textAlign: "center" }}>
+          "Save & Regenerate" will rebuild the schedule based on new area assignments
+        </p>
       </div>
     </Modal>
   );

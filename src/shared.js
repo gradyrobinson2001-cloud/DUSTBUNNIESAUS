@@ -456,69 +456,177 @@ export function generateScheduleForClients(clients, startDate, endDate, settings
   const start = new Date(startDate);
   const end = new Date(endDate);
   
-  // Track jobs per team per day to balance load
-  const dayLoads = {}; // { "2025-02-17_team_a": 3, ... }
-  
   const getDateStr = (d) => d.toISOString().split("T")[0];
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
   
-  // For each client, determine their next clean dates
+  // Build a map of suburb -> preferred day based on area schedule
+  const suburbToDay = {};
+  Object.entries(settings.areaSchedule).forEach(([day, suburbs]) => {
+    suburbs.forEach(suburb => {
+      suburbToDay[suburb.toLowerCase()] = day;
+    });
+  });
+  
+  // Track team schedules: { "2025-02-17_team_a": [{ start: 480, end: 600 }, ...] }
+  const teamSchedules = {};
+  
+  const timeToMins = (t) => {
+    const [h, m] = t.split(":").map(Number);
+    return h * 60 + m;
+  };
+  
+  const minsToTime = (mins) => {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  };
+  
+  const workStart = timeToMins(settings.workingHours.start);
+  const workEnd = timeToMins(settings.workingHours.end);
+  const breakDuration = settings.workingHours.breakDuration;
+  const travelBuffer = settings.workingHours.travelBuffer;
+  const middayMins = 12 * 60; // 12:00 = 720 mins
+  
+  // Get next available slot for a team on a date
+  const getNextSlot = (dateStr, teamId, duration) => {
+    const key = `${dateStr}_${teamId}`;
+    if (!teamSchedules[key]) {
+      teamSchedules[key] = [];
+    }
+    
+    const schedule = teamSchedules[key];
+    const jobCount = schedule.filter(s => s.type === "job").length;
+    
+    // Check if team is at capacity
+    if (jobCount >= settings.jobsPerTeamPerDay) {
+      return null;
+    }
+    
+    // Find first available slot
+    let slotStart = workStart;
+    
+    if (schedule.length > 0) {
+      // Sort by start time
+      schedule.sort((a, b) => a.start - b.start);
+      const lastSlot = schedule[schedule.length - 1];
+      slotStart = lastSlot.end + travelBuffer;
+    }
+    
+    // Check if we need to insert a break (after 2nd job, closest to midday)
+    if (jobCount === 2 && !schedule.some(s => s.type === "break")) {
+      // Insert break now if we're past 11am or this job would push us past 1pm
+      if (slotStart >= 11 * 60 || slotStart + duration > 13 * 60) {
+        const breakSlot = { type: "break", start: slotStart, end: slotStart + breakDuration };
+        schedule.push(breakSlot);
+        slotStart = breakSlot.end + travelBuffer;
+      }
+    }
+    
+    const slotEnd = slotStart + duration;
+    
+    // Check if job fits within working hours
+    if (slotEnd > workEnd) {
+      return null;
+    }
+    
+    return { start: slotStart, end: slotEnd };
+  };
+  
+  // Add a job to the schedule
+  const addToSchedule = (dateStr, teamId, slot) => {
+    const key = `${dateStr}_${teamId}`;
+    if (!teamSchedules[key]) {
+      teamSchedules[key] = [];
+    }
+    teamSchedules[key].push({ type: "job", ...slot });
+  };
+  
+  // Generate dates to check
+  const allDates = [];
+  let currentDate = new Date(start);
+  while (currentDate <= end) {
+    const dayName = dayNames[currentDate.getDay()];
+    if (dayName !== "saturday" && dayName !== "sunday") {
+      allDates.push({
+        dateStr: getDateStr(currentDate),
+        dayName
+      });
+    }
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+  
+  // Process each client
   clients.forEach(client => {
     if (client.status !== "active") return;
     
     const duration = client.customDuration || calculateDuration(client, settings);
-    let currentDate = new Date(start);
     
-    while (currentDate <= end) {
-      const dayName = getDayOfWeek(getDateStr(currentDate));
-      const dateStr = getDateStr(currentDate);
+    // Determine which day this client should be scheduled based on their suburb
+    const clientSuburbDay = suburbToDay[client.suburb.toLowerCase()] || client.preferredDay;
+    
+    // Find matching dates for this client's frequency
+    let scheduledCount = 0;
+    const maxSchedules = client.frequency === "weekly" ? 2 : 1; // 2 weeks of data
+    
+    for (const { dateStr, dayName } of allDates) {
+      if (scheduledCount >= maxSchedules) break;
       
-      // Check if this day matches client's preferred day
-      if (dayName === client.preferredDay) {
-        const loadKey = `${dateStr}_${client.assignedTeam}`;
-        const currentLoad = dayLoads[loadKey] || 0;
+      // Check if this day matches client's suburb-assigned day
+      if (dayName !== clientSuburbDay) continue;
+      
+      // For fortnightly, skip every other occurrence
+      if (client.frequency === "fortnightly" && scheduledCount === 1) continue;
+      
+      // Try to get a slot for this client's assigned team
+      const slot = getNextSlot(dateStr, client.assignedTeam, duration);
+      
+      if (slot) {
+        addToSchedule(dateStr, client.assignedTeam, slot);
         
-        // Only add if team has capacity
-        if (currentLoad < settings.jobsPerTeamPerDay) {
-          // Calculate start time based on existing jobs
-          const baseStart = settings.workingHours.start;
-          const [baseHour, baseMin] = baseStart.split(":").map(Number);
-          const jobStartMinutes = (baseHour * 60 + baseMin) + 
-            (currentLoad * (duration + settings.workingHours.travelBuffer));
-          
-          const startHour = Math.floor(jobStartMinutes / 60);
-          const startMin = jobStartMinutes % 60;
-          const endMinutes = jobStartMinutes + duration;
-          const endHour = Math.floor(endMinutes / 60);
-          const endMin = endMinutes % 60;
-          
-          jobs.push({
-            id: `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            date: dateStr,
-            clientId: client.id,
-            clientName: client.name,
-            suburb: client.suburb,
-            teamId: client.assignedTeam,
-            startTime: `${String(startHour).padStart(2, "0")}:${String(startMin).padStart(2, "0")}`,
-            endTime: `${String(endHour).padStart(2, "0")}:${String(endMin).padStart(2, "0")}`,
-            duration,
-            status: "scheduled",
-            isDemo: client.isDemo,
-          });
-          
-          dayLoads[loadKey] = currentLoad + 1;
-        }
+        jobs.push({
+          id: `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          date: dateStr,
+          clientId: client.id,
+          clientName: client.name,
+          suburb: client.suburb,
+          teamId: client.assignedTeam,
+          startTime: minsToTime(slot.start),
+          endTime: minsToTime(slot.end),
+          duration,
+          status: "scheduled",
+          isDemo: client.isDemo,
+        });
         
-        // Move to next occurrence based on frequency
+        scheduledCount++;
+        
+        // Skip ahead based on frequency
         if (client.frequency === "weekly") {
-          currentDate.setDate(currentDate.getDate() + 7);
-        } else if (client.frequency === "fortnightly") {
-          currentDate.setDate(currentDate.getDate() + 14);
-        } else {
-          currentDate.setDate(currentDate.getDate() + 28);
+          // Find the next occurrence of this day (7 days later)
+          const nextIndex = allDates.findIndex(d => d.dateStr === dateStr) + 5; // roughly 7 days accounting for weekends
         }
-      } else {
-        currentDate.setDate(currentDate.getDate() + 1);
       }
+    }
+  });
+  
+  // Add break entries to jobs for display
+  Object.entries(teamSchedules).forEach(([key, schedule]) => {
+    const [dateStr, teamId] = key.split("_");
+    const breakSlot = schedule.find(s => s.type === "break");
+    if (breakSlot) {
+      jobs.push({
+        id: `break_${dateStr}_${teamId}`,
+        date: dateStr,
+        clientId: null,
+        clientName: "🍴 Break",
+        suburb: "",
+        teamId: teamId.replace("_", ""), // Fix: team_a -> team_a
+        startTime: minsToTime(breakSlot.start),
+        endTime: minsToTime(breakSlot.end),
+        duration: breakDuration,
+        status: "break",
+        isDemo: true,
+        isBreak: true,
+      });
     }
   });
   
