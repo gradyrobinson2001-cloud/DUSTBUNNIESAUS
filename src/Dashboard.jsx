@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS } from "./shared";
+import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS } from "./shared";
 import emailjs from '@emailjs/browser';
 
 // ─── EmailJS Config ───
@@ -102,6 +102,23 @@ export default function Dashboard() {
   const [pricing, setPricing] = useState(loadPricing);
   const [templates, setTemplates] = useState(loadTemplates);
   const [clients, setClients] = useState(loadClients);
+  
+  // Scheduling state
+  const [scheduleSettings, setScheduleSettings] = useState(loadScheduleSettings);
+  const [scheduleClients, setScheduleClients] = useState(loadScheduleClients);
+  const [scheduledJobs, setScheduledJobs] = useState(loadScheduledJobs);
+  const [calendarWeekStart, setCalendarWeekStart] = useState(() => {
+    const today = new Date();
+    const day = today.getDay();
+    const diff = today.getDate() - day + (day === 0 ? -6 : 1); // Monday
+    return new Date(today.setDate(diff)).toISOString().split("T")[0];
+  });
+  const [showScheduleSettings, setShowScheduleSettings] = useState(false);
+  const [editingJob, setEditingJob] = useState(null);
+  const [editingScheduleClient, setEditingScheduleClient] = useState(null);
+  const [demoMode, setDemoMode] = useState(() => {
+    return loadScheduleClients().some(c => c.isDemo);
+  });
   
   const [filter, setFilter] = useState("active");
   const [searchTerm, setSearchTerm] = useState("");
@@ -230,6 +247,20 @@ export default function Dashboard() {
   useEffect(() => {
     saveClients(clients);
   }, [clients]);
+
+  // Persist scheduling data
+  useEffect(() => {
+    saveScheduleSettings(scheduleSettings);
+  }, [scheduleSettings]);
+
+  useEffect(() => {
+    saveScheduleClients(scheduleClients);
+    setDemoMode(scheduleClients.some(c => c.isDemo));
+  }, [scheduleClients]);
+
+  useEffect(() => {
+    saveScheduledJobs(scheduledJobs);
+  }, [scheduledJobs]);
 
   // ─── Actions ───
   const sendInfoForm = (enqId) => {
@@ -373,6 +404,106 @@ export default function Dashboard() {
     showToast("📋 Copied to clipboard!");
   };
 
+  // ─── Calendar/Scheduling Functions ───
+  const loadDemoData = () => {
+    const demoClients = generateDemoClients(45);
+    
+    // Calculate durations
+    demoClients.forEach(c => {
+      c.estimatedDuration = calculateDuration(c, scheduleSettings);
+    });
+    
+    // Generate 2 weeks of schedules
+    const today = new Date();
+    const day = today.getDay();
+    const monday = new Date(today);
+    monday.setDate(today.getDate() - day + (day === 0 ? -6 : 1));
+    
+    const twoWeeksLater = new Date(monday);
+    twoWeeksLater.setDate(monday.getDate() + 13);
+    
+    const demoJobs = generateScheduleForClients(
+      demoClients, 
+      monday.toISOString().split("T")[0],
+      twoWeeksLater.toISOString().split("T")[0],
+      scheduleSettings
+    );
+    
+    setScheduleClients(prev => [...prev.filter(c => !c.isDemo), ...demoClients]);
+    setScheduledJobs(prev => [...prev.filter(j => !j.isDemo), ...demoJobs]);
+    showToast(`✅ Loaded ${demoClients.length} demo clients with ${demoJobs.length} scheduled jobs`);
+  };
+
+  const wipeDemo = () => {
+    if (!window.confirm("Remove all demo clients and their scheduled jobs? Real clients won't be affected.")) return;
+    const { clients: remainingClients, jobs: remainingJobs } = wipeDemoData();
+    setScheduleClients(remainingClients);
+    setScheduledJobs(remainingJobs);
+    showToast("🗑️ Demo data wiped");
+  };
+
+  const getWeekDates = (startDate) => {
+    const dates = [];
+    const start = new Date(startDate);
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      dates.push(d.toISOString().split("T")[0]);
+    }
+    return dates;
+  };
+
+  const navigateWeek = (direction) => {
+    const current = new Date(calendarWeekStart);
+    current.setDate(current.getDate() + (direction * 7));
+    setCalendarWeekStart(current.toISOString().split("T")[0]);
+  };
+
+  const getJobsForDateAndTeam = (date, teamId) => {
+    return scheduledJobs
+      .filter(j => j.date === date && j.teamId === teamId)
+      .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  };
+
+  const updateJob = (jobId, updates) => {
+    setScheduledJobs(prev => prev.map(j => j.id === jobId ? { ...j, ...updates } : j));
+    setEditingJob(null);
+    showToast("✅ Job updated");
+  };
+
+  const deleteJob = (jobId) => {
+    if (!window.confirm("Delete this job?")) return;
+    setScheduledJobs(prev => prev.filter(j => j.id !== jobId));
+    setEditingJob(null);
+    showToast("🗑️ Job deleted");
+  };
+
+  const addNewJob = (job) => {
+    setScheduledJobs(prev => [...prev, { ...job, id: `job_${Date.now()}` }]);
+    showToast("✅ Job added");
+  };
+
+  const updateScheduleClient = (clientId, updates) => {
+    setScheduleClients(prev => prev.map(c => c.id === clientId ? { ...c, ...updates } : c));
+    setEditingScheduleClient(null);
+    showToast("✅ Client updated");
+  };
+
+  const deleteScheduleClient = (clientId) => {
+    if (!window.confirm("Delete this client and all their scheduled jobs?")) return;
+    setScheduleClients(prev => prev.filter(c => c.id !== clientId));
+    setScheduledJobs(prev => prev.filter(j => j.clientId !== clientId));
+    setEditingScheduleClient(null);
+    showToast("🗑️ Client deleted");
+  };
+
+  const weekDates = getWeekDates(calendarWeekStart);
+  const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const formatDate = (dateStr) => {
+    const d = new Date(dateStr);
+    return d.toLocaleDateString("en-AU", { day: "numeric", month: "short" });
+  };
+
   // ─── Filtered Enquiries ───
   const filtered = enquiries.filter(e => {
     // First apply archive filter
@@ -410,6 +541,7 @@ export default function Dashboard() {
   const navItems = [
     { id: "inbox", label: "Inbox", icon: "📥", badge: enquiries.filter(e => !e.archived && ["new", "info_received", "quote_ready"].includes(e.status)).length },
     { id: "quotes", label: "Quotes", icon: "💰", badge: pendingQuotes.length },
+    { id: "calendar", label: "Calendar", icon: "📅", badge: 0 },
     { id: "clients", label: "Clients", icon: "👥", badge: clients.length },
     { id: "templates", label: "Templates", icon: "💬", badge: 0 },
     { id: "form", label: "Customer Form", icon: "📋", badge: 0 },
@@ -701,6 +833,226 @@ export default function Dashboard() {
                 <p>No quotes yet — they'll appear when you generate them from the inbox</p>
               </div>
             )}
+          </>
+        )}
+
+        {/* ─── CALENDAR PAGE ─── */}
+        {page === "calendar" && (
+          <>
+            {/* Header with Demo Controls */}
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", gap: 12, marginBottom: 20 }}>
+              <div>
+                <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 24, fontWeight: 900, color: T.text }}>Calendar</h1>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textMuted }}>
+                  {scheduleClients.filter(c => c.status === "active").length} active clients · {scheduledJobs.length} scheduled jobs
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button onClick={() => setShowScheduleSettings(true)} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
+                  ⚙️ Settings
+                </button>
+                <button onClick={() => setEditingScheduleClient({})} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: "none", background: T.primary, fontSize: 12, fontWeight: 700, color: "#fff", cursor: "pointer" }}>
+                  + Add Client
+                </button>
+              </div>
+            </div>
+
+            {/* Demo Mode Controls */}
+            <div style={{ background: demoMode ? T.accentLight : T.blueLight, borderRadius: T.radius, padding: "14px 20px", marginBottom: 20, display: "flex", alignItems: isMobile ? "stretch" : "center", justifyContent: "space-between", flexDirection: isMobile ? "column" : "row", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 18 }}>🧪</span>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: demoMode ? "#8B6914" : T.blue }}>
+                    {demoMode ? "Demo Mode Active" : "Demo Mode"}
+                  </div>
+                  <div style={{ fontSize: 12, color: T.textMuted }}>
+                    {demoMode ? `${scheduleClients.filter(c => c.isDemo).length} demo clients loaded` : "Load sample data to test the calendar"}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {!demoMode ? (
+                  <button onClick={loadDemoData} style={{ padding: "8px 16px", borderRadius: T.radiusSm, border: "none", background: T.blue, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    Load 45 Demo Clients
+                  </button>
+                ) : (
+                  <button onClick={wipeDemo} style={{ padding: "8px 16px", borderRadius: T.radiusSm, border: "none", background: T.danger, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    ⚠️ Wipe Demo Data
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Week Navigation */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <button onClick={() => navigateWeek(-1)} style={{ padding: "8px 16px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 13, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
+                ← Prev Week
+              </button>
+              <div style={{ fontWeight: 700, fontSize: 16, color: T.text }}>
+                {formatDate(weekDates[0])} — {formatDate(weekDates[6])}
+              </div>
+              <button onClick={() => navigateWeek(1)} style={{ padding: "8px 16px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 13, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
+                Next Week →
+              </button>
+            </div>
+
+            {/* Team Legend */}
+            <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
+              {scheduleSettings.teams.map(team => (
+                <div key={team.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 12, height: 12, borderRadius: 3, background: team.color }} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{team.name}</span>
+                  <span style={{ fontSize: 12, color: T.textMuted }}>
+                    ({scheduledJobs.filter(j => j.teamId === team.id && weekDates.includes(j.date)).length} jobs this week)
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Calendar Grid */}
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(5, minmax(140px, 1fr))" : "repeat(5, 1fr)", gap: 12, minWidth: isMobile ? 700 : "auto" }}>
+                {weekDates.slice(0, 5).map((date, i) => {
+                  const isToday = date === new Date().toISOString().split("T")[0];
+                  const areaForDay = scheduleSettings.areaSchedule[dayNames[i].toLowerCase()] || [];
+                  
+                  return (
+                    <div key={date} style={{ background: "#fff", borderRadius: T.radius, overflow: "hidden", boxShadow: T.shadow, border: isToday ? `2px solid ${T.primary}` : "none" }}>
+                      {/* Day Header */}
+                      <div style={{ background: isToday ? T.primary : T.sidebar, padding: "12px 14px", color: "#fff" }}>
+                        <div style={{ fontWeight: 800, fontSize: 14 }}>{dayNames[i]}</div>
+                        <div style={{ fontSize: 12, opacity: 0.8 }}>{formatDate(date)}</div>
+                        {areaForDay.length > 0 && (
+                          <div style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>📍 {areaForDay.join(", ")}</div>
+                        )}
+                      </div>
+                      
+                      {/* Teams */}
+                      <div style={{ padding: "12px" }}>
+                        {scheduleSettings.teams.map(team => {
+                          const teamJobs = getJobsForDateAndTeam(date, team.id);
+                          return (
+                            <div key={team.id} style={{ marginBottom: 12 }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: team.color, marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
+                                <div style={{ width: 8, height: 8, borderRadius: 2, background: team.color }} />
+                                {team.name} ({teamJobs.length}/{scheduleSettings.jobsPerTeamPerDay})
+                              </div>
+                              
+                              {teamJobs.length === 0 ? (
+                                <div style={{ padding: "8px 10px", background: T.bg, borderRadius: 6, fontSize: 11, color: T.textLight, textAlign: "center" }}>
+                                  No jobs
+                                </div>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                  {teamJobs.map(job => (
+                                    <div
+                                      key={job.id}
+                                      onClick={() => setEditingJob(job)}
+                                      style={{
+                                        padding: "8px 10px",
+                                        background: job.status === "completed" ? "#D4EDDA" : `${team.color}15`,
+                                        borderLeft: `3px solid ${team.color}`,
+                                        borderRadius: "0 6px 6px 0",
+                                        cursor: "pointer",
+                                        transition: "all 0.15s",
+                                      }}
+                                    >
+                                      <div style={{ fontWeight: 700, fontSize: 12, color: T.text, marginBottom: 2 }}>{job.clientName}</div>
+                                      <div style={{ fontSize: 10, color: T.textMuted }}>
+                                        {job.startTime} - {job.endTime}
+                                      </div>
+                                      <div style={{ fontSize: 10, color: T.textMuted, display: "flex", alignItems: "center", gap: 4 }}>
+                                        📍 {job.suburb}
+                                        {job.status === "completed" && <span style={{ color: "#155724" }}>✓</span>}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                        
+                        {/* Add Job Button */}
+                        <button
+                          onClick={() => setEditingJob({ date, teamId: scheduleSettings.teams[0].id, isNew: true })}
+                          style={{ width: "100%", padding: "6px", borderRadius: 6, border: `1.5px dashed ${T.border}`, background: "transparent", fontSize: 11, color: T.textMuted, cursor: "pointer", marginTop: 4 }}
+                        >
+                          + Add Job
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Scheduled Clients List */}
+            <div style={{ marginTop: 32 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: T.text }}>Scheduled Clients</h3>
+                <span style={{ fontSize: 13, color: T.textMuted }}>
+                  {scheduleClients.filter(c => !c.isDemo).length} real · {scheduleClients.filter(c => c.isDemo).length} demo
+                </span>
+              </div>
+              
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)", gap: 12 }}>
+                {scheduleClients.slice(0, 12).map(client => {
+                  const team = scheduleSettings.teams.find(t => t.id === client.assignedTeam);
+                  const duration = client.customDuration || calculateDuration(client, scheduleSettings);
+                  const nextJob = scheduledJobs.find(j => j.clientId === client.id && j.date >= new Date().toISOString().split("T")[0]);
+                  
+                  return (
+                    <div
+                      key={client.id}
+                      onClick={() => setEditingScheduleClient(client)}
+                      style={{
+                        background: "#fff",
+                        borderRadius: T.radius,
+                        padding: "14px 16px",
+                        boxShadow: T.shadow,
+                        cursor: "pointer",
+                        borderLeft: `4px solid ${team?.color || T.border}`,
+                        opacity: client.isDemo ? 0.8 : 1,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>
+                            {client.name}
+                            {client.isDemo && <span style={{ marginLeft: 6, fontSize: 10, padding: "2px 6px", background: T.accentLight, color: "#8B6914", borderRadius: 4 }}>DEMO</span>}
+                          </div>
+                          <div style={{ fontSize: 12, color: T.textMuted }}>📍 {client.suburb}</div>
+                        </div>
+                        <div style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, background: team?.color + "20", color: team?.color, fontWeight: 700 }}>
+                          {team?.name}
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: "flex", gap: 12, fontSize: 11, color: T.textMuted }}>
+                        <span>🕐 {duration} mins</span>
+                        <span>📅 {client.frequency}</span>
+                        <span>📆 {client.preferredDay}</span>
+                      </div>
+                      
+                      {nextJob && (
+                        <div style={{ marginTop: 8, fontSize: 11, color: T.primary, fontWeight: 600 }}>
+                          Next: {formatDate(nextJob.date)} at {nextJob.startTime}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              
+              {scheduleClients.length > 12 && (
+                <div style={{ textAlign: "center", marginTop: 16 }}>
+                  <span style={{ fontSize: 13, color: T.textMuted }}>
+                    + {scheduleClients.length - 12} more clients
+                  </span>
+                </div>
+              )}
+            </div>
           </>
         )}
 
@@ -1025,6 +1377,50 @@ export default function Dashboard() {
           onSend={sendQuoteEmail}
           onClose={() => setEmailPreview(null)}
           sending={sendingEmail}
+        />
+      )}
+
+      {/* Schedule Settings Modal */}
+      {showScheduleSettings && (
+        <ScheduleSettingsModal
+          settings={scheduleSettings}
+          onSave={(updated) => { setScheduleSettings(updated); setShowScheduleSettings(false); showToast("✅ Settings saved"); }}
+          onClose={() => setShowScheduleSettings(false)}
+        />
+      )}
+
+      {/* Edit Job Modal */}
+      {editingJob && (
+        <EditJobModal
+          job={editingJob}
+          clients={scheduleClients}
+          settings={scheduleSettings}
+          onSave={editingJob.isNew ? addNewJob : (updates) => updateJob(editingJob.id, updates)}
+          onDelete={editingJob.isNew ? null : () => deleteJob(editingJob.id)}
+          onClose={() => setEditingJob(null)}
+        />
+      )}
+
+      {/* Edit Schedule Client Modal */}
+      {editingScheduleClient && (
+        <EditScheduleClientModal
+          client={editingScheduleClient}
+          settings={scheduleSettings}
+          onSave={editingScheduleClient.id ? (updates) => updateScheduleClient(editingScheduleClient.id, updates) : (newClient) => {
+            const client = {
+              ...newClient,
+              id: `client_${Date.now()}`,
+              isDemo: false,
+              createdAt: new Date().toISOString(),
+              status: "active",
+            };
+            client.estimatedDuration = calculateDuration(client, scheduleSettings);
+            setScheduleClients(prev => [...prev, client]);
+            setEditingScheduleClient(null);
+            showToast("✅ Client added");
+          }}
+          onDelete={editingScheduleClient.id ? () => deleteScheduleClient(editingScheduleClient.id) : null}
+          onClose={() => setEditingScheduleClient(null)}
         />
       )}
 
@@ -1415,5 +1811,411 @@ function QuotePreviewInline({ quote, pricing }) {
         <p style={{ margin: 0, fontSize: 11, color: T.textLight }}>Dust Bunnies Cleaning · Sunshine Coast · Eco-conscious 🌿</p>
       </div>
     </div>
+  );
+}
+
+// ─── Schedule Settings Modal ───
+function ScheduleSettingsModal({ settings, onSave, onClose }) {
+  const [local, setLocal] = useState({ ...settings });
+  const u = (path, value) => {
+    const keys = path.split(".");
+    setLocal(prev => {
+      const updated = { ...prev };
+      let obj = updated;
+      for (let i = 0; i < keys.length - 1; i++) {
+        obj[keys[i]] = { ...obj[keys[i]] };
+        obj = obj[keys[i]];
+      }
+      obj[keys[keys.length - 1]] = value;
+      return updated;
+    });
+  };
+
+  return (
+    <Modal title="⚙️ Schedule Settings" onClose={onClose} wide>
+      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+        
+        {/* Teams */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Teams</label>
+          {local.teams.map((team, i) => (
+            <div key={team.id} style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+              <input
+                type="text"
+                value={team.name}
+                onChange={e => {
+                  const teams = [...local.teams];
+                  teams[i] = { ...teams[i], name: e.target.value };
+                  setLocal({ ...local, teams });
+                }}
+                style={{ flex: 1, padding: "10px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+              />
+              <input
+                type="color"
+                value={team.color}
+                onChange={e => {
+                  const teams = [...local.teams];
+                  teams[i] = { ...teams[i], color: e.target.value };
+                  setLocal({ ...local, teams });
+                }}
+                style={{ width: 50, height: 42, borderRadius: 8, border: `1.5px solid ${T.border}`, cursor: "pointer" }}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Working Hours */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Working Hours</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>Start</div>
+              <input type="time" value={local.workingHours.start} onChange={e => u("workingHours.start", e.target.value)}
+                style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>End</div>
+              <input type="time" value={local.workingHours.end} onChange={e => u("workingHours.end", e.target.value)}
+                style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>Break (mins)</div>
+              <input type="number" value={local.workingHours.breakDuration} onChange={e => u("workingHours.breakDuration", Number(e.target.value))}
+                style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>Travel Buffer</div>
+              <input type="number" value={local.workingHours.travelBuffer} onChange={e => u("workingHours.travelBuffer", Number(e.target.value))}
+                style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+            </div>
+          </div>
+        </div>
+
+        {/* Duration Estimates */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Duration Estimates (minutes per room)</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 10 }}>
+            {[["bedroom", "🛏️"], ["bathroom", "🚿"], ["living", "🛋️"], ["kitchen", "🍳"], ["baseSetup", "🏠 Setup"]].map(([key, label]) => (
+              <div key={key}>
+                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 4 }}>{label}</div>
+                <input type="number" value={local.durationEstimates[key]} onChange={e => u(`durationEstimates.${key}`, Number(e.target.value))}
+                  style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Jobs Per Team */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 6 }}>Jobs Per Team Per Day</label>
+          <input type="number" value={local.jobsPerTeamPerDay} onChange={e => setLocal({ ...local, jobsPerTeamPerDay: Number(e.target.value) })} min={1} max={6}
+            style={{ width: 100, padding: "10px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+        </div>
+
+        {/* Area Schedule */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Area Schedule (suburbs per day)</label>
+          {["monday", "tuesday", "wednesday", "thursday", "friday"].map(day => (
+            <div key={day} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <div style={{ width: 80, fontSize: 13, fontWeight: 600, color: T.text, textTransform: "capitalize" }}>{day}</div>
+              <input
+                type="text"
+                value={(local.areaSchedule[day] || []).join(", ")}
+                onChange={e => {
+                  const areas = e.target.value.split(",").map(s => s.trim()).filter(Boolean);
+                  setLocal({ ...local, areaSchedule: { ...local.areaSchedule, [day]: areas } });
+                }}
+                placeholder="e.g. Buderim, Kuluin"
+                style={{ flex: 1, padding: "10px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 13 }}
+              />
+            </div>
+          ))}
+        </div>
+
+        <button onClick={() => onSave(local)} style={{ width: "100%", padding: "14px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+          Save Settings
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ─── Edit Job Modal ───
+function EditJobModal({ job, clients, settings, onSave, onDelete, onClose }) {
+  const [local, setLocal] = useState({
+    date: job.date || "",
+    clientId: job.clientId || "",
+    teamId: job.teamId || settings.teams[0]?.id,
+    startTime: job.startTime || "08:00",
+    duration: job.duration || 120,
+    status: job.status || "scheduled",
+  });
+
+  const selectedClient = clients.find(c => c.id === local.clientId);
+  const u = (k, v) => setLocal({ ...local, [k]: v });
+
+  const handleSave = () => {
+    if (!local.date || !local.clientId) return;
+    const client = clients.find(c => c.id === local.clientId);
+    
+    // Calculate end time
+    const [h, m] = local.startTime.split(":").map(Number);
+    const endMins = h * 60 + m + local.duration;
+    const endTime = `${String(Math.floor(endMins / 60)).padStart(2, "0")}:${String(endMins % 60).padStart(2, "0")}`;
+    
+    onSave({
+      date: local.date,
+      clientId: local.clientId,
+      clientName: client?.name || "Unknown",
+      suburb: client?.suburb || "",
+      teamId: local.teamId,
+      startTime: local.startTime,
+      endTime,
+      duration: local.duration,
+      status: local.status,
+      isDemo: client?.isDemo || false,
+    });
+    onClose();
+  };
+
+  return (
+    <Modal title={job.isNew ? "Add Job" : "Edit Job"} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>DATE</label>
+          <input type="date" value={local.date} onChange={e => u("date", e.target.value)}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+        </div>
+
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>CLIENT</label>
+          <select value={local.clientId} onChange={e => {
+            const client = clients.find(c => c.id === e.target.value);
+            u("clientId", e.target.value);
+            if (client) {
+              setLocal(prev => ({ ...prev, clientId: e.target.value, duration: client.customDuration || client.estimatedDuration || 120 }));
+            }
+          }} style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+            <option value="">Select client...</option>
+            {clients.filter(c => c.status === "active").map(c => (
+              <option key={c.id} value={c.id}>{c.name} ({c.suburb}){c.isDemo ? " [Demo]" : ""}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>TEAM</label>
+            <select value={local.teamId} onChange={e => u("teamId", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              {settings.teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>STATUS</label>
+            <select value={local.status} onChange={e => u("status", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              <option value="scheduled">Scheduled</option>
+              <option value="completed">Completed</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>START TIME</label>
+            <input type="time" value={local.startTime} onChange={e => u("startTime", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>DURATION (mins)</label>
+            <input type="number" value={local.duration} onChange={e => u("duration", Number(e.target.value))} min={30} step={15}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+          </div>
+        </div>
+
+        {selectedClient && (
+          <div style={{ background: T.bg, borderRadius: T.radiusSm, padding: "12px 14px", fontSize: 12, color: T.textMuted }}>
+            📍 {selectedClient.suburb} · 🛏️ {selectedClient.bedrooms} bed · 🚿 {selectedClient.bathrooms} bath
+            {selectedClient.notes && <div style={{ marginTop: 6, color: T.text }}>📝 {selectedClient.notes}</div>}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10 }}>
+          {onDelete && (
+            <button onClick={onDelete} style={{ padding: "12px 18px", borderRadius: T.radiusSm, border: "none", background: "#FDF0EF", color: T.danger, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              🗑️ Delete
+            </button>
+          )}
+          <button onClick={handleSave} disabled={!local.date || !local.clientId}
+            style={{ flex: 1, padding: "12px", borderRadius: T.radiusSm, border: "none", background: local.date && local.clientId ? T.primary : T.border, color: "#fff", fontWeight: 700, fontSize: 14, cursor: local.date && local.clientId ? "pointer" : "not-allowed" }}>
+            {job.isNew ? "Add Job" : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ─── Edit Schedule Client Modal ───
+function EditScheduleClientModal({ client, settings, onSave, onDelete, onClose }) {
+  const isNew = !client.id;
+  const [local, setLocal] = useState({
+    name: client.name || "",
+    email: client.email || "",
+    phone: client.phone || "",
+    suburb: client.suburb || SERVICED_AREAS[0],
+    bedrooms: client.bedrooms || 3,
+    bathrooms: client.bathrooms || 2,
+    living: client.living || 1,
+    kitchen: client.kitchen || 1,
+    frequency: client.frequency || "fortnightly",
+    preferredDay: client.preferredDay || "monday",
+    preferredTime: client.preferredTime || "anytime",
+    assignedTeam: client.assignedTeam || settings.teams[0]?.id,
+    customDuration: client.customDuration || null,
+    notes: client.notes || "",
+    status: client.status || "active",
+  });
+
+  const u = (k, v) => setLocal({ ...local, [k]: v });
+  const estimatedDuration = calculateDuration(local, settings);
+
+  return (
+    <Modal title={isNew ? "Add Client" : `Edit: ${client.name}`} onClose={onClose} wide>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        
+        {/* Basic Info */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>NAME</label>
+            <input type="text" value={local.name} onChange={e => u("name", e.target.value)} placeholder="Client name"
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>SUBURB</label>
+            <select value={local.suburb} onChange={e => u("suburb", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              {SERVICED_AREAS.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>EMAIL</label>
+            <input type="email" value={local.email} onChange={e => u("email", e.target.value)} placeholder="email@example.com"
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>PHONE</label>
+            <input type="tel" value={local.phone} onChange={e => u("phone", e.target.value)} placeholder="0412 345 678"
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+          </div>
+        </div>
+
+        {/* Room Counts */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 10 }}>ROOMS</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
+            {[["bedrooms", "🛏️ Bed"], ["bathrooms", "🚿 Bath"], ["living", "🛋️ Living"], ["kitchen", "🍳 Kitchen"]].map(([key, label]) => (
+              <div key={key} style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 6 }}>{label}</div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                  <button onClick={() => u(key, Math.max(0, local[key] - 1))} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${T.border}`, background: "#fff", cursor: "pointer", fontSize: 14 }}>-</button>
+                  <span style={{ fontWeight: 700, width: 20, textAlign: "center" }}>{local[key]}</span>
+                  <button onClick={() => u(key, local[key] + 1)} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${T.primary}`, background: T.primaryLight, cursor: "pointer", fontSize: 14, color: T.primary }}>+</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Schedule Settings */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>FREQUENCY</label>
+            <select value={local.frequency} onChange={e => u("frequency", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              <option value="weekly">Weekly</option>
+              <option value="fortnightly">Fortnightly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>PREFERRED DAY</label>
+            <select value={local.preferredDay} onChange={e => u("preferredDay", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              {["monday", "tuesday", "wednesday", "thursday", "friday"].map(d => (
+                <option key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>TEAM</label>
+            <select value={local.assignedTeam} onChange={e => u("assignedTeam", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              {settings.teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </div>
+        </div>
+
+        {/* Duration */}
+        <div style={{ background: T.bg, borderRadius: T.radiusSm, padding: "14px 16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Estimated Duration: {estimatedDuration} mins</div>
+              <div style={{ fontSize: 11, color: T.textMuted }}>Based on room counts</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: T.textMuted }}>Override:</span>
+              <input
+                type="number"
+                value={local.customDuration || ""}
+                onChange={e => u("customDuration", e.target.value ? Number(e.target.value) : null)}
+                placeholder={String(estimatedDuration)}
+                style={{ width: 80, padding: "8px 10px", borderRadius: 6, border: `1.5px solid ${T.border}`, fontSize: 13 }}
+              />
+              <span style={{ fontSize: 11, color: T.textMuted }}>mins</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Notes */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>NOTES</label>
+          <textarea value={local.notes} onChange={e => u("notes", e.target.value)} placeholder="e.g. Has 2 dogs, keep gate closed..."
+            rows={2} style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 13, resize: "vertical" }} />
+        </div>
+
+        {/* Status (for existing clients) */}
+        {!isNew && (
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>STATUS</label>
+            <select value={local.status} onChange={e => u("status", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}>
+              <option value="active">Active</option>
+              <option value="paused">Paused</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 10 }}>
+          {onDelete && (
+            <button onClick={onDelete} style={{ padding: "12px 18px", borderRadius: T.radiusSm, border: "none", background: "#FDF0EF", color: T.danger, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+              🗑️ Delete
+            </button>
+          )}
+          <button onClick={() => { onSave(local); onClose(); }} disabled={!local.name}
+            style={{ flex: 1, padding: "12px", borderRadius: T.radiusSm, border: "none", background: local.name ? T.primary : T.border, color: "#fff", fontWeight: 700, fontSize: 14, cursor: local.name ? "pointer" : "not-allowed" }}>
+            {isNew ? "Add Client" : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

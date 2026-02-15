@@ -265,3 +265,271 @@ export function getInitialQuotes() {
 
 // ─── Icon options for new services ───
 export const ICON_OPTIONS = ["🧹", "🧽", "🪣", "🧴", "✨", "🏠", "🚿", "🛁", "🪟", "🚪", "🛋️", "🛏️", "🍳", "♨️", "📦", "🌿", "💨", "🧺", "🪑", "🖼️"];
+
+// ═══════════════════════════════════════════════════════════
+// SCHEDULING SYSTEM
+// ═══════════════════════════════════════════════════════════
+
+export const DEFAULT_SCHEDULE_SETTINGS = {
+  teams: [
+    { id: "team_a", name: "Team A", color: "#4A9E7E" },
+    { id: "team_b", name: "Team B", color: "#5B9EC4" },
+  ],
+  workingHours: {
+    start: "08:00",
+    end: "16:00",
+    breakDuration: 30, // minutes
+    travelBuffer: 20, // minutes between jobs
+  },
+  durationEstimates: {
+    bedroom: 25,
+    bathroom: 30,
+    living: 20,
+    kitchen: 25,
+    baseSetup: 30,
+  },
+  areaSchedule: {
+    monday: ["Buderim", "Kuluin"],
+    tuesday: ["Maroochydore", "Alexandra Headland"],
+    wednesday: ["Mooloolaba", "Minyama"],
+    thursday: ["Twin Waters", "Mountain Creek"],
+    friday: ["Forest Glen", "Mons"],
+  },
+  jobsPerTeamPerDay: 3,
+};
+
+export function loadScheduleSettings() {
+  try {
+    const stored = localStorage.getItem("db_schedule_settings");
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return { ...DEFAULT_SCHEDULE_SETTINGS };
+}
+
+export function saveScheduleSettings(settings) {
+  try {
+    localStorage.setItem("db_schedule_settings", JSON.stringify(settings));
+  } catch {}
+}
+
+export function loadScheduledJobs() {
+  try {
+    const stored = localStorage.getItem("db_scheduled_jobs");
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return [];
+}
+
+export function saveScheduledJobs(jobs) {
+  try {
+    localStorage.setItem("db_scheduled_jobs", JSON.stringify(jobs));
+  } catch {}
+}
+
+export function loadScheduleClients() {
+  try {
+    const stored = localStorage.getItem("db_schedule_clients");
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return [];
+}
+
+export function saveScheduleClients(clients) {
+  try {
+    localStorage.setItem("db_schedule_clients", JSON.stringify(clients));
+  } catch {}
+}
+
+// ─── Calculate job duration from room counts ───
+export function calculateDuration(client, settings) {
+  const est = settings.durationEstimates;
+  let duration = est.baseSetup;
+  duration += (client.bedrooms || 0) * est.bedroom;
+  duration += (client.bathrooms || 0) * est.bathroom;
+  duration += (client.living || 0) * est.living;
+  duration += (client.kitchen || 0) * est.kitchen;
+  return duration;
+}
+
+// ─── Get day of week from date ───
+export function getDayOfWeek(dateStr) {
+  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  return days[new Date(dateStr).getDay()];
+}
+
+// ─── Demo Data Generator ───
+const DEMO_NAMES = [
+  "Sarah Mitchell", "James Cooper", "Priya Sharma", "Lena Nguyen", "Tom Wilson",
+  "Emily Watson", "Mike Chen", "Jessica Lee", "David Kim", "Rachel Green",
+  "Sophie Turner", "Alex Morrison", "Hannah Brooks", "Ben Gallagher", "Olivia Hart",
+  "Nathan Price", "Emma Collins", "Ryan Murphy", "Chloe Adams", "Jack Thompson",
+  "Mia Roberts", "Luke Anderson", "Zoe Campbell", "Ethan Wright", "Lily Scott",
+  "Noah Martin", "Grace Taylor", "Mason Brown", "Ava Davis", "Logan White",
+  "Isla Moore", "Carter Hall", "Amelia Clark", "Owen Lewis", "Harper Young",
+  "Sebastian King", "Ella Baker", "Henry Hill", "Scarlett Reed", "William Cook",
+  "Victoria Morgan", "Daniel Evans", "Penelope Shaw", "Matthew Ross", "Aria Hughes"
+];
+
+const DEMO_NOTES = [
+  "2 dogs, keep gate closed",
+  "Key under front mat",
+  "Ring doorbell, don't knock",
+  "Alarm code: 1234#",
+  "Cat is friendly",
+  "Park in driveway",
+  "Use side entrance",
+  "Has a cleaner-friendly vacuum",
+  "Prefers eco products only",
+  "Leave invoice on kitchen counter",
+  "Baby sleeps 1-3pm, be quiet",
+  "Water plants on windowsill please",
+  "",
+  "",
+  "",
+  "",
+  "",
+];
+
+export function generateDemoClients(count = 45) {
+  const clients = [];
+  const frequencies = [
+    ...Array(18).fill("weekly"),
+    ...Array(20).fill("fortnightly"),
+    ...Array(7).fill("monthly"),
+  ].sort(() => Math.random() - 0.5);
+
+  const shuffledNames = [...DEMO_NAMES].sort(() => Math.random() - 0.5);
+  const allSuburbs = [...SERVICED_AREAS];
+
+  for (let i = 0; i < count; i++) {
+    const name = shuffledNames[i] || `Client ${i + 1}`;
+    const suburb = allSuburbs[i % allSuburbs.length];
+    const frequency = frequencies[i] || "fortnightly";
+    
+    const bedrooms = 2 + Math.floor(Math.random() * 3); // 2-4
+    const bathrooms = 1 + Math.floor(Math.random() * 2); // 1-2
+    const living = 1 + Math.floor(Math.random() * 2); // 1-2
+    const kitchen = 1;
+    
+    // Assign preferred day based on suburb (for clustering)
+    const dayMap = {
+      "Buderim": "monday", "Kuluin": "monday",
+      "Maroochydore": "tuesday", "Alexandra Headland": "tuesday",
+      "Mooloolaba": "wednesday", "Minyama": "wednesday",
+      "Twin Waters": "thursday", "Mountain Creek": "thursday",
+      "Forest Glen": "friday", "Mons": "friday",
+    };
+    const preferredDay = dayMap[suburb] || "monday";
+    
+    // Alternate teams based on index
+    const team = i % 2 === 0 ? "team_a" : "team_b";
+    
+    clients.push({
+      id: `demo_client_${i + 1}`,
+      name,
+      email: name.toLowerCase().replace(" ", ".") + "@email.com",
+      phone: "04" + Math.floor(10000000 + Math.random() * 90000000),
+      suburb,
+      bedrooms,
+      bathrooms,
+      living,
+      kitchen,
+      frequency,
+      preferredDay,
+      preferredTime: ["morning", "afternoon", "anytime"][Math.floor(Math.random() * 3)],
+      assignedTeam: team,
+      estimatedDuration: null, // Will be calculated
+      customDuration: null, // Manual override
+      status: "active",
+      notes: DEMO_NOTES[Math.floor(Math.random() * DEMO_NOTES.length)],
+      isDemo: true,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  
+  return clients;
+}
+
+// ─── Generate schedule for clients over date range ───
+export function generateScheduleForClients(clients, startDate, endDate, settings) {
+  const jobs = [];
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  
+  // Track jobs per team per day to balance load
+  const dayLoads = {}; // { "2025-02-17_team_a": 3, ... }
+  
+  const getDateStr = (d) => d.toISOString().split("T")[0];
+  
+  // For each client, determine their next clean dates
+  clients.forEach(client => {
+    if (client.status !== "active") return;
+    
+    const duration = client.customDuration || calculateDuration(client, settings);
+    let currentDate = new Date(start);
+    
+    while (currentDate <= end) {
+      const dayName = getDayOfWeek(getDateStr(currentDate));
+      const dateStr = getDateStr(currentDate);
+      
+      // Check if this day matches client's preferred day
+      if (dayName === client.preferredDay) {
+        const loadKey = `${dateStr}_${client.assignedTeam}`;
+        const currentLoad = dayLoads[loadKey] || 0;
+        
+        // Only add if team has capacity
+        if (currentLoad < settings.jobsPerTeamPerDay) {
+          // Calculate start time based on existing jobs
+          const baseStart = settings.workingHours.start;
+          const [baseHour, baseMin] = baseStart.split(":").map(Number);
+          const jobStartMinutes = (baseHour * 60 + baseMin) + 
+            (currentLoad * (duration + settings.workingHours.travelBuffer));
+          
+          const startHour = Math.floor(jobStartMinutes / 60);
+          const startMin = jobStartMinutes % 60;
+          const endMinutes = jobStartMinutes + duration;
+          const endHour = Math.floor(endMinutes / 60);
+          const endMin = endMinutes % 60;
+          
+          jobs.push({
+            id: `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            date: dateStr,
+            clientId: client.id,
+            clientName: client.name,
+            suburb: client.suburb,
+            teamId: client.assignedTeam,
+            startTime: `${String(startHour).padStart(2, "0")}:${String(startMin).padStart(2, "0")}`,
+            endTime: `${String(endHour).padStart(2, "0")}:${String(endMin).padStart(2, "0")}`,
+            duration,
+            status: "scheduled",
+            isDemo: client.isDemo,
+          });
+          
+          dayLoads[loadKey] = currentLoad + 1;
+        }
+        
+        // Move to next occurrence based on frequency
+        if (client.frequency === "weekly") {
+          currentDate.setDate(currentDate.getDate() + 7);
+        } else if (client.frequency === "fortnightly") {
+          currentDate.setDate(currentDate.getDate() + 14);
+        } else {
+          currentDate.setDate(currentDate.getDate() + 28);
+        }
+      } else {
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+    }
+  });
+  
+  return jobs;
+}
+
+// ─── Wipe all demo data ───
+export function wipeDemoData() {
+  const clients = loadScheduleClients().filter(c => !c.isDemo);
+  const jobs = loadScheduledJobs().filter(j => !j.isDemo);
+  saveScheduleClients(clients);
+  saveScheduledJobs(jobs);
+  return { clients, jobs };
+}
