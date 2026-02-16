@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS, loadEmailHistory, saveEmailHistory, addEmailToHistory, getLastEmailForClient, daysSince, getFollowUpStatus, EMAIL_TEMPLATES, CUSTOM_EMAIL_STYLES, SUBURB_COORDS, getClientCoords } from "./shared";
 import emailjs from '@emailjs/browser';
 
@@ -151,6 +151,7 @@ export default function Dashboard() {
   const [mapsLoaded, setMapsLoaded] = useState(false);
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
+  const [calendarTravelTimes, setCalendarTravelTimes] = useState({}); // { "date_teamId": [{ from, to, distance, duration }] }
   
   const [filter, setFilter] = useState("active");
   const [searchTerm, setSearchTerm] = useState("");
@@ -938,35 +939,172 @@ export default function Dashboard() {
         ],
       });
     }
+    return mapInstanceRef.current;
   }, [mapsLoaded]);
 
+  // Initialize map when Tools page is active and maps are loaded
+  useEffect(() => {
+    if (page === "tools" && mapsLoaded && mapRef.current) {
+      setTimeout(() => {
+        initializeMap();
+      }, 100);
+    }
+  }, [page, mapsLoaded, initializeMap]);
+
+  // Draw routes when routeData changes
+  useEffect(() => {
+    if (routeData && mapsLoaded && page === "tools") {
+      setTimeout(() => {
+        drawRouteOnMap();
+      }, 200);
+    }
+  }, [routeData, mapsLoaded, page]);
+
+  // Calculate travel times for calendar view
+  const calculateCalendarTravelTimes = useCallback(async () => {
+    if (!mapsLoaded || scheduledJobs.length === 0) return;
+    
+    const newTravelTimes = {};
+    const dates = weekDates.slice(0, 5); // Mon-Fri
+    
+    for (const date of dates) {
+      for (const team of scheduleSettings.teams) {
+        const teamJobs = scheduledJobs
+          .filter(j => j.date === date && j.teamId === team.id && !j.isBreak)
+          .sort((a, b) => a.startTime.localeCompare(b.startTime));
+        
+        if (teamJobs.length < 2) continue;
+        
+        const key = `${date}_${team.id}`;
+        newTravelTimes[key] = [];
+        
+        for (let i = 0; i < teamJobs.length - 1; i++) {
+          const fromClient = scheduleClients.find(c => c.id === teamJobs[i].clientId);
+          const toClient = scheduleClients.find(c => c.id === teamJobs[i + 1].clientId);
+          
+          if (fromClient && toClient) {
+            try {
+              // Use Google Maps Distance Matrix directly here
+              if (window.google?.maps) {
+                const service = new window.google.maps.DistanceMatrixService();
+                const fromAddr = fromClient.address || `${fromClient.suburb}, QLD, Australia`;
+                const toAddr = toClient.address || `${toClient.suburb}, QLD, Australia`;
+                
+                const result = await new Promise((resolve) => {
+                  service.getDistanceMatrix({
+                    origins: [fromAddr],
+                    destinations: [toAddr],
+                    travelMode: window.google.maps.TravelMode.DRIVING,
+                    unitSystem: window.google.maps.UnitSystem.METRIC,
+                  }, (response, status) => {
+                    if (status === "OK" && response.rows[0]?.elements[0]?.status === "OK") {
+                      const element = response.rows[0].elements[0];
+                      resolve({
+                        distance: (element.distance.value / 1000).toFixed(1),
+                        duration: Math.round(element.duration.value / 60),
+                      });
+                    } else {
+                      resolve({ distance: "?", duration: "?" });
+                    }
+                  });
+                });
+                
+                newTravelTimes[key].push({
+                  from: teamJobs[i].clientId,
+                  to: teamJobs[i + 1].clientId,
+                  ...result
+                });
+              }
+            } catch (e) {
+              newTravelTimes[key].push({ distance: "?", duration: "?" });
+            }
+          }
+        }
+      }
+    }
+    
+    setCalendarTravelTimes(newTravelTimes);
+    showToast("✅ Travel times calculated");
+  }, [mapsLoaded, scheduledJobs, scheduleClients, scheduleSettings.teams, weekDates, showToast]);
+
+  // Load travel times when viewing calendar - REMOVED auto calc to save API calls
+  // User can click "Calc Travel" button manually
+
   const drawRouteOnMap = useCallback(async () => {
-    if (!mapInstanceRef.current || !routeData || !window.google?.maps) return;
+    if (!mapRef.current || !routeData || !window.google?.maps) return;
+    
+    // Initialize map if not already done
+    if (!mapInstanceRef.current) {
+      mapInstanceRef.current = new window.google.maps.Map(mapRef.current, {
+        center: { lat: -26.6590, lng: 153.0800 },
+        zoom: 11,
+        styles: [
+          { featureType: "poi", stylers: [{ visibility: "off" }] },
+          { featureType: "transit", stylers: [{ visibility: "off" }] },
+        ],
+      });
+    }
     
     const map = mapInstanceRef.current;
     
-    // Clear existing overlays
-    // Note: In production, we'd track and clear markers/polylines properly
+    // Clear existing renderers
+    if (window.directionsRenderers) {
+      window.directionsRenderers.forEach(r => r.setMap(null));
+    }
+    window.directionsRenderers = [];
     
     const directionsService = new window.google.maps.DirectionsService();
     const bounds = new window.google.maps.LatLngBounds();
     
-    const drawTeamRoute = async (teamRoute, color, label) => {
-      if (!teamRoute.jobs || teamRoute.jobs.length < 2) return;
-      
-      const waypoints = teamRoute.jobs.slice(1, -1).map(job => {
-        const client = scheduleClients.find(c => c.id === job.clientId);
-        const addr = client?.address || `${job.suburb}, QLD, Australia`;
-        return { location: addr, stopover: true };
-      });
-      
-      const firstClient = scheduleClients.find(c => c.id === teamRoute.jobs[0].clientId);
-      const lastClient = scheduleClients.find(c => c.id === teamRoute.jobs[teamRoute.jobs.length - 1].clientId);
-      
-      const origin = firstClient?.address || `${teamRoute.jobs[0].suburb}, QLD, Australia`;
-      const destination = lastClient?.address || `${teamRoute.jobs[teamRoute.jobs.length - 1].suburb}, QLD, Australia`;
-      
-      try {
+    const drawTeamRoute = (teamRoute, color, label) => {
+      return new Promise((resolve) => {
+        if (!teamRoute.jobs || teamRoute.jobs.length < 1) {
+          resolve();
+          return;
+        }
+        
+        // If only one job, just add a marker
+        if (teamRoute.jobs.length === 1) {
+          const client = scheduleClients.find(c => c.id === teamRoute.jobs[0].clientId);
+          const addr = client?.address || `${teamRoute.jobs[0].suburb}, QLD, Australia`;
+          
+          const geocoder = new window.google.maps.Geocoder();
+          geocoder.geocode({ address: addr }, (results, status) => {
+            if (status === "OK" && results[0]) {
+              const pos = results[0].geometry.location;
+              new window.google.maps.Marker({
+                position: pos,
+                map,
+                label: { text: "1", color: "#fff" },
+                icon: {
+                  path: window.google.maps.SymbolPath.CIRCLE,
+                  scale: 12,
+                  fillColor: color,
+                  fillOpacity: 1,
+                  strokeWeight: 2,
+                  strokeColor: "#fff",
+                }
+              });
+              bounds.extend(pos);
+              map.fitBounds(bounds);
+            }
+            resolve();
+          });
+          return;
+        }
+        
+        const waypoints = teamRoute.jobs.slice(1, -1).map(job => {
+          const client = scheduleClients.find(c => c.id === job.clientId);
+          const addr = client?.address || `${job.suburb}, QLD, Australia`;
+          return { location: addr, stopover: true };
+        });
+        
+        const firstClient = scheduleClients.find(c => c.id === teamRoute.jobs[0].clientId);
+        const lastClient = scheduleClients.find(c => c.id === teamRoute.jobs[teamRoute.jobs.length - 1].clientId);
+        
+        const origin = firstClient?.address || `${teamRoute.jobs[0].suburb}, QLD, Australia`;
+        const destination = lastClient?.address || `${teamRoute.jobs[teamRoute.jobs.length - 1].suburb}, QLD, Australia`;
+        
         directionsService.route({
           origin,
           destination,
@@ -975,16 +1113,27 @@ export default function Dashboard() {
           optimizeWaypoints: false,
         }, (result, status) => {
           if (status === "OK") {
-            new window.google.maps.DirectionsRenderer({
+            const renderer = new window.google.maps.DirectionsRenderer({
               map,
               directions: result,
               suppressMarkers: false,
               polylineOptions: {
                 strokeColor: color,
-                strokeWeight: 4,
+                strokeWeight: 5,
                 strokeOpacity: 0.8,
               },
+              markerOptions: {
+                icon: {
+                  path: window.google.maps.SymbolPath.CIRCLE,
+                  scale: 10,
+                  fillColor: color,
+                  fillOpacity: 1,
+                  strokeWeight: 2,
+                  strokeColor: "#fff",
+                }
+              }
             });
+            window.directionsRenderers.push(renderer);
             
             // Extend bounds
             result.routes[0].legs.forEach(leg => {
@@ -993,10 +1142,9 @@ export default function Dashboard() {
             });
             map.fitBounds(bounds);
           }
+          resolve();
         });
-      } catch (error) {
-        console.error(`Error drawing ${label} route:`, error);
-      }
+      });
     };
     
     // Draw both team routes
@@ -2045,6 +2193,11 @@ export default function Dashboard() {
                     🔄 Regenerate
                   </button>
                 )}
+                {mapsLoaded && scheduledJobs.length > 0 && (
+                  <button onClick={() => calculateCalendarTravelTimes()} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.primary}`, background: T.primaryLight, fontSize: 12, fontWeight: 700, color: T.primaryDark, cursor: "pointer" }}>
+                    🚗 Calc Travel
+                  </button>
+                )}
                 <button onClick={() => setShowScheduleSettings(true)} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
                   ⚙️ Settings
                 </button>
@@ -2140,41 +2293,77 @@ export default function Dashboard() {
                                   No jobs
                                 </div>
                               ) : (
-                                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                  {teamJobs.map(job => (
-                                    <div
-                                      key={job.id}
-                                      onClick={() => !job.isBreak && setEditingJob(job)}
-                                      style={{
-                                        padding: "8px 10px",
-                                        background: job.isBreak 
-                                          ? T.accentLight 
-                                          : job.status === "completed" 
-                                            ? "#D4EDDA" 
-                                            : `${team.color}15`,
-                                        borderLeft: job.isBreak 
-                                          ? `3px solid ${T.accent}` 
-                                          : `3px solid ${team.color}`,
-                                        borderRadius: "0 6px 6px 0",
-                                        cursor: job.isBreak ? "default" : "pointer",
-                                        transition: "all 0.15s",
-                                      }}
-                                    >
-                                      <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2 }}>
-                                        {job.isBreak ? "🍴 Lunch Break" : job.clientName}
-                                      </div>
-                                      <div style={{ fontSize: 10, color: T.textMuted }}>
-                                        {job.startTime} - {job.endTime}
-                                        {!job.isBreak && <span> ({job.duration} mins)</span>}
-                                      </div>
-                                      {!job.isBreak && (
-                                        <div style={{ fontSize: 10, color: T.textMuted, display: "flex", alignItems: "center", gap: 4 }}>
-                                          📍 {job.suburb}
-                                          {job.status === "completed" && <span style={{ color: "#155724" }}>✓</span>}
+                                <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                                  {teamJobs.map((job, jobIndex) => {
+                                    // Get travel info to next job
+                                    const nextJob = teamJobs[jobIndex + 1];
+                                    const travelKey = `${date}_${team.id}`;
+                                    const travelData = calendarTravelTimes[travelKey]?.[jobIndex];
+                                    
+                                    return (
+                                      <React.Fragment key={job.id}>
+                                        <div
+                                          onClick={() => !job.isBreak && setEditingJob(job)}
+                                          style={{
+                                            padding: "8px 10px",
+                                            background: job.isBreak 
+                                              ? T.accentLight 
+                                              : job.status === "completed" 
+                                                ? "#D4EDDA" 
+                                                : `${team.color}15`,
+                                            borderLeft: job.isBreak 
+                                              ? `3px solid ${T.accent}` 
+                                              : `3px solid ${team.color}`,
+                                            borderRadius: "0 6px 6px 0",
+                                            cursor: job.isBreak ? "default" : "pointer",
+                                            transition: "all 0.15s",
+                                          }}
+                                        >
+                                          <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2 }}>
+                                            {job.isBreak ? "🍴 Lunch Break" : job.clientName}
+                                          </div>
+                                          <div style={{ fontSize: 10, color: T.textMuted }}>
+                                            {job.startTime} - {job.endTime}
+                                            {!job.isBreak && <span> ({job.duration} mins)</span>}
+                                          </div>
+                                          {!job.isBreak && (
+                                            <div style={{ fontSize: 10, color: T.textMuted, display: "flex", alignItems: "center", gap: 4 }}>
+                                              📍 {job.suburb}
+                                              {job.status === "completed" && <span style={{ color: "#155724" }}>✓</span>}
+                                            </div>
+                                          )}
                                         </div>
-                                      )}
-                                    </div>
-                                  ))}
+                                        
+                                        {/* Travel time indicator to next job */}
+                                        {nextJob && (
+                                          <div style={{ 
+                                            padding: "4px 10px 4px 14px", 
+                                            fontSize: 9, 
+                                            color: T.textLight,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 4,
+                                            borderLeft: `3px solid ${T.border}`,
+                                            marginLeft: 0,
+                                          }}>
+                                            {travelData ? (
+                                              <>
+                                                <span>↓</span>
+                                                <span style={{ color: T.textMuted }}>{travelData.duration} mins</span>
+                                                <span>·</span>
+                                                <span>{travelData.distance} km</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <span>↓</span>
+                                                <span style={{ fontStyle: "italic" }}>travel</span>
+                                              </>
+                                            )}
+                                          </div>
+                                        )}
+                                      </React.Fragment>
+                                    );
+                                  })}
                                 </div>
                               )}
                             </div>
@@ -2188,6 +2377,49 @@ export default function Dashboard() {
                         >
                           + Add Job
                         </button>
+                        
+                        {/* Daily Travel Summary */}
+                        {(() => {
+                          // Calculate total travel for this day
+                          let totalDistance = 0;
+                          let totalDuration = 0;
+                          let hasData = false;
+                          
+                          scheduleSettings.teams.forEach(team => {
+                            const key = `${date}_${team.id}`;
+                            const travelData = calendarTravelTimes[key];
+                            if (travelData) {
+                              travelData.forEach(t => {
+                                if (t.distance && !isNaN(parseFloat(t.distance))) {
+                                  totalDistance += parseFloat(t.distance);
+                                  hasData = true;
+                                }
+                                if (t.duration && !isNaN(parseInt(t.duration))) {
+                                  totalDuration += parseInt(t.duration);
+                                }
+                              });
+                            }
+                          });
+                          
+                          if (!hasData) return null;
+                          
+                          return (
+                            <div style={{ 
+                              marginTop: 8, 
+                              padding: "8px 10px", 
+                              background: T.bg, 
+                              borderRadius: 6, 
+                              fontSize: 10, 
+                              color: T.textMuted,
+                              display: "flex",
+                              justifyContent: "center",
+                              gap: 12,
+                            }}>
+                              <span>🚗 {totalDistance.toFixed(1)} km</span>
+                              <span>⏱️ {totalDuration} mins</span>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   );
