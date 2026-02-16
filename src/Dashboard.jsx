@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS } from "./shared";
+import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS, loadEmailHistory, saveEmailHistory, addEmailToHistory, getLastEmailForClient, daysSince, getFollowUpStatus, EMAIL_TEMPLATES, CUSTOM_EMAIL_STYLES } from "./shared";
 import emailjs from '@emailjs/browser';
 
 // ─── EmailJS Config ───
 const EMAILJS_SERVICE_ID = "service_v0w9y88";
-const EMAILJS_TEMPLATE_ID = "template_mbaynwc";
+const EMAILJS_TEMPLATE_ID = "template_mbaynwc"; // Quote emails
+const EMAILJS_UNIVERSAL_TEMPLATE_ID = "template_kgstqkg"; // All other emails
 const EMAILJS_PUBLIC_KEY = "MZs9Wz8jaU2en7Pdd";
 
 // ═══════════════════════════════════════════════════════════
@@ -119,6 +120,23 @@ export default function Dashboard() {
   const [demoMode, setDemoMode] = useState(() => {
     return loadScheduleClients().some(c => c.isDemo);
   });
+  
+  // Email Center state
+  const [emailHistory, setEmailHistory] = useState(loadEmailHistory);
+  const [selectedEmailTemplate, setSelectedEmailTemplate] = useState("follow_up");
+  const [selectedRecipients, setSelectedRecipients] = useState([]);
+  const [recipientFilter, setRecipientFilter] = useState("all");
+  const [customEmailStyle, setCustomEmailStyle] = useState("announcement");
+  const [customEmailContent, setCustomEmailContent] = useState({
+    subject: "",
+    headline: "",
+    message: "",
+    buttonText: "",
+    buttonLink: "",
+    showButton: false,
+  });
+  const [showEmailPreview, setShowEmailPreview] = useState(false);
+  const [sendingBulkEmail, setSendingBulkEmail] = useState(false);
   
   const [filter, setFilter] = useState("active");
   const [searchTerm, setSearchTerm] = useState("");
@@ -262,6 +280,10 @@ export default function Dashboard() {
     saveScheduledJobs(scheduledJobs);
   }, [scheduledJobs]);
 
+  useEffect(() => {
+    saveEmailHistory(emailHistory);
+  }, [emailHistory]);
+
   // ─── Actions ───
   const sendInfoForm = (enqId) => {
     setEnquiries(prev => prev.map(e => e.id === enqId ? { ...e, status: "info_requested" } : e));
@@ -324,9 +346,19 @@ export default function Dashboard() {
         EMAILJS_PUBLIC_KEY
       );
       
-      // Mark quote as sent
+      // Mark quote as sent with timestamp
+      const now = new Date().toISOString();
       setQuotes(prev => prev.map(q => q.id === quote.id ? { ...q, status: "sent" } : q));
-      setEnquiries(prev => prev.map(e => e.id === quote.enquiryId ? { ...e, status: "quote_sent" } : e));
+      setEnquiries(prev => prev.map(e => e.id === quote.enquiryId ? { ...e, status: "quote_sent", quoteSentAt: now } : e));
+      
+      // Add to email history
+      addEmailToHistory({
+        clientId: enquiry.id,
+        recipientName: quote.name,
+        recipientEmail: enquiry?.details?.email,
+        templateType: "quote",
+      });
+      setEmailHistory(loadEmailHistory());
       
       setEmailPreview(null);
       showToast(`✅ Quote sent to ${enquiry?.details?.email}!`);
@@ -544,6 +576,179 @@ export default function Dashboard() {
     return d.toLocaleDateString("en-AU", { day: "numeric", month: "short" });
   };
 
+  // ─── Email Center Functions ───
+  const getFilteredEmailRecipients = useCallback(() => {
+    // Combine enquiries and schedule clients to get all potential recipients
+    const allRecipients = [];
+    
+    // Add enquiries with email
+    enquiries.forEach(e => {
+      if (e.details?.email && !e.archived) {
+        allRecipients.push({
+          id: e.id,
+          name: e.name,
+          email: e.details.email,
+          type: e.status === "quote_sent" ? "quote_sent" : e.status === "accepted" ? "active" : "lead",
+          quoteSentAt: e.quoteSentAt || (e.status === "quote_sent" ? e.timestamp : null),
+          status: e.status,
+        });
+      }
+    });
+    
+    // Add schedule clients with email (if not already in enquiries)
+    scheduleClients.forEach(c => {
+      if (c.email && !allRecipients.find(r => r.email === c.email)) {
+        allRecipients.push({
+          id: c.id,
+          name: c.name,
+          email: c.email,
+          type: "active",
+          quoteSentAt: null,
+          status: "active",
+        });
+      }
+    });
+    
+    // Apply filter
+    switch (recipientFilter) {
+      case "leads":
+        return allRecipients.filter(r => r.type === "lead" || r.status === "new" || r.status === "info_received");
+      case "quote_sent":
+        return allRecipients.filter(r => r.type === "quote_sent" || r.status === "quote_sent");
+      case "active":
+        return allRecipients.filter(r => r.type === "active" || r.status === "accepted");
+      default:
+        return allRecipients;
+    }
+  }, [enquiries, scheduleClients, recipientFilter]);
+
+  const handleBulkEmailSend = async () => {
+    if (selectedRecipients.length === 0) return;
+    
+    const confirmed = window.confirm(`Send ${EMAIL_TEMPLATES[selectedEmailTemplate]?.name || "email"} to ${selectedRecipients.length} recipient${selectedRecipients.length > 1 ? "s" : ""}?`);
+    if (!confirmed) return;
+    
+    setSendingBulkEmail(true);
+    const recipients = getFilteredEmailRecipients().filter(r => selectedRecipients.includes(r.id));
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    for (const recipient of recipients) {
+      try {
+        // Build template params based on template type
+        const templateParams = buildEmailTemplateParams(recipient, selectedEmailTemplate, customEmailContent, customEmailStyle);
+        
+        await emailjs.send(
+          EMAILJS_SERVICE_ID,
+          getEmailJSTemplateId(selectedEmailTemplate),
+          templateParams,
+          EMAILJS_PUBLIC_KEY
+        );
+        
+        // Record in history
+        addEmailToHistory({
+          clientId: recipient.id,
+          recipientName: recipient.name,
+          recipientEmail: recipient.email,
+          templateType: selectedEmailTemplate,
+          customStyle: selectedEmailTemplate === "custom" ? customEmailStyle : null,
+        });
+        
+        successCount++;
+      } catch (error) {
+        console.error(`Failed to send to ${recipient.email}:`, error);
+        failCount++;
+      }
+    }
+    
+    // Update local state
+    setEmailHistory(loadEmailHistory());
+    setSendingBulkEmail(false);
+    setSelectedRecipients([]);
+    
+    if (failCount === 0) {
+      showToast(`✅ Sent ${successCount} email${successCount > 1 ? "s" : ""} successfully!`);
+    } else {
+      showToast(`⚠️ Sent ${successCount}, failed ${failCount}`);
+    }
+  };
+
+  const buildEmailTemplateParams = (recipient, templateType, customContent, customStyle) => {
+    const firstName = recipient.name?.split(" ")[0] || "there";
+    
+    const baseParams = {
+      to_email: recipient.email,
+      customer_name: firstName,
+      header_color: "#1B3A2D", // Default dark green
+    };
+    
+    switch (templateType) {
+      case "follow_up":
+        return {
+          ...baseParams,
+          subject: "Just checking in! 🌿 — Dust Bunnies Cleaning",
+          headline: "",
+          message: `Hey <strong>${firstName}</strong>! 👋<br><br>Just wanted to check in about the quote we sent through a few days ago. We'd love to help get your home sparkling clean!<br><br>If you have any questions at all, or if you'd like to make any changes to the quote, just reply to this email — we're always happy to chat.<br><br>Ready to book? Simply reply "Yes" and we'll get you scheduled! 💚`,
+          show_button: "",
+          button_text: "",
+          button_link: "",
+        };
+      case "review_request":
+        return {
+          ...baseParams,
+          subject: "Loved your clean? We'd love a review! ⭐",
+          headline: "We'd Love Your Feedback! ⭐",
+          message: `Hey <strong>${firstName}</strong>! 👋<br><br>We hope you've been enjoying your sparkling clean home! We absolutely loved working with you.<br><br>If you have a moment, we'd really appreciate a quick Google review. It helps other families find us and means the world to our small team!`,
+          show_button: "true",
+          button_text: "⭐ Leave a Review",
+          button_link: "https://g.page/r/YOUR_GOOGLE_REVIEW_LINK",
+        };
+      case "booking_confirmation":
+        return {
+          ...baseParams,
+          subject: "You're booked in! 🎉 — Dust Bunnies Cleaning",
+          headline: "You're All Booked In! 🎉",
+          message: `Hey <strong>${firstName}</strong>!<br><br>Great news — you're all booked in! We can't wait to make your home sparkle.<br><br>We'll send you a reminder the day before your first clean. If you need to reschedule at any time, just reply to this email!<br><br>See you soon! 💚`,
+          show_button: "",
+          button_text: "",
+          button_link: "",
+        };
+      case "reminder":
+        return {
+          ...baseParams,
+          subject: "See you tomorrow! 🌿 — Dust Bunnies Cleaning",
+          headline: "See You Tomorrow! 🏠✨",
+          message: `Hey <strong>${firstName}</strong>! 👋<br><br>Just a friendly reminder that we'll be there <strong>tomorrow</strong> to give your home a beautiful clean!<br><br><strong>Quick tip:</strong> Clear surfaces where possible, and let us know if there's anything specific you'd like us to focus on!<br><br>See you tomorrow! 💚`,
+          show_button: "",
+          button_text: "",
+          button_link: "",
+        };
+      case "custom":
+        const style = CUSTOM_EMAIL_STYLES[customStyle];
+        return {
+          ...baseParams,
+          subject: customContent.subject || "Message from Dust Bunnies Cleaning 🌿",
+          headline: customContent.headline || "",
+          message: (customContent.message || "").replace(/{NAME}/g, firstName).replace(/\n/g, "<br>"),
+          show_button: customContent.showButton ? "true" : "",
+          button_text: customContent.buttonText || "",
+          button_link: customContent.buttonLink || "",
+          header_color: style?.headerColor || "#1B3A2D",
+        };
+      default:
+        return baseParams;
+    }
+  };
+
+  const getEmailJSTemplateId = (templateType) => {
+    // Use quote template for quotes, universal template for everything else
+    if (templateType === "quote") {
+      return EMAILJS_TEMPLATE_ID;
+    }
+    return EMAILJS_UNIVERSAL_TEMPLATE_ID;
+  };
+
   // ─── Filtered Enquiries ───
   const filtered = enquiries.filter(e => {
     // First apply archive filter
@@ -578,10 +783,18 @@ export default function Dashboard() {
   const archivedCount = enquiries.filter(e => e.archived).length;
 
   // ─── Sidebar Items ───
+  // Calculate follow-ups needed (quotes sent 3+ days ago, not accepted/declined)
+  const quotesNeedingFollowUp = enquiries.filter(e => {
+    if (e.status !== "quote_sent") return false;
+    const days = daysSince(e.quoteSentAt || e.timestamp);
+    return days >= 3;
+  });
+
   const navItems = [
     { id: "inbox", label: "Inbox", icon: "📥", badge: enquiries.filter(e => !e.archived && ["new", "info_received", "quote_ready"].includes(e.status)).length },
     { id: "quotes", label: "Quotes", icon: "💰", badge: pendingQuotes.length },
     { id: "calendar", label: "Calendar", icon: "📅", badge: 0 },
+    { id: "emails", label: "Email Center", icon: "📧", badge: quotesNeedingFollowUp.length },
     { id: "clients", label: "Clients", icon: "👥", badge: clients.length },
     { id: "templates", label: "Templates", icon: "💬", badge: 0 },
     { id: "form", label: "Customer Form", icon: "📋", badge: 0 },
@@ -679,6 +892,26 @@ export default function Dashboard() {
         {/* ─── INBOX PAGE ─── */}
         {page === "inbox" && (
           <>
+            {/* Follow-up Alert Banner */}
+            {quotesNeedingFollowUp.length > 0 && (
+              <div style={{ background: T.accentLight, borderRadius: T.radius, padding: "14px 20px", marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>⚠️</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: "#8B6914" }}>
+                      {quotesNeedingFollowUp.length} quote{quotesNeedingFollowUp.length > 1 ? "s" : ""} awaiting response
+                    </div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>
+                      Oldest: {Math.max(...quotesNeedingFollowUp.map(e => daysSince(e.quoteSentAt || e.timestamp)))} days ago
+                    </div>
+                  </div>
+                </div>
+                <button onClick={() => setPage("emails")} style={{ padding: "8px 16px", borderRadius: T.radiusSm, border: "none", background: "#8B6914", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                  📧 Send Follow-ups
+                </button>
+              </div>
+            )}
+
             <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", gap: 12, marginBottom: 20 }}>
               <div>
                 <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 24, fontWeight: 900, color: T.text }}>Inbox</h1>
@@ -706,11 +939,13 @@ export default function Dashboard() {
 
             {/* Enquiry Cards */}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {filtered.map(e => (
+              {filtered.map(e => {
+                const followUp = e.status === "quote_sent" ? getFollowUpStatus(e.quoteSentAt || e.timestamp) : null;
+                return (
                 <div key={e.id} style={{
                   background: "#fff", borderRadius: T.radius, padding: isMobile ? "14px 16px" : "18px 20px",
                   boxShadow: T.shadow,
-                  borderLeft: e.archived ? `4px solid ${T.textLight}` : e.status === "new" ? `4px solid ${T.blue}` : e.status === "info_received" ? `4px solid ${T.accent}` : "4px solid transparent",
+                  borderLeft: e.archived ? `4px solid ${T.textLight}` : followUp?.level === "urgent" ? `4px solid ${T.danger}` : followUp?.level === "warning" ? `4px solid ${T.accent}` : e.status === "new" ? `4px solid ${T.blue}` : e.status === "info_received" ? `4px solid ${T.accent}` : "4px solid transparent",
                   opacity: e.archived ? 0.7 : 1,
                 }}>
                   <div style={{ display: "flex", alignItems: "flex-start", gap: isMobile ? 10 : 14 }}>
@@ -730,6 +965,13 @@ export default function Dashboard() {
 
                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                         <StatusBadge status={e.status} />
+                        
+                        {/* Follow-up Badge */}
+                        {followUp && (
+                          <span style={{ padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, background: followUp.level === "urgent" ? T.dangerLight : T.accentLight, color: followUp.color }}>
+                            {followUp.label}
+                          </span>
+                        )}
 
                         {/* Contact Info Quick View */}
                         {e.details?.email && (
@@ -751,6 +993,9 @@ export default function Dashboard() {
                             {e.status === "quote_ready" && (
                               <button onClick={() => setPage("quotes")} style={actionBtn(T.primaryLight, T.primaryDark)}>👁️ Review</button>
                             )}
+                            {followUp && followUp.days >= 3 && (
+                              <button onClick={() => { setPage("emails"); setSelectedRecipients([e.id]); }} style={actionBtn(T.accentLight, "#8B6914")}>📩 Follow-up</button>
+                            )}
                             {e.details && (
                               <button onClick={() => setSelectedEnquiry(e)} style={actionBtn(T.borderLight, T.textMuted)}>📋 Details</button>
                             )}
@@ -767,7 +1012,7 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </div>
-              ))}
+              );})}
               {filtered.length === 0 && (
                 <div style={{ textAlign: "center", padding: 60, color: T.textLight }}>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>📭</div>
@@ -873,6 +1118,361 @@ export default function Dashboard() {
                 <p>No quotes yet — they'll appear when you generate them from the inbox</p>
               </div>
             )}
+          </>
+        )}
+
+        {/* ─── EMAIL CENTER PAGE ─── */}
+        {page === "emails" && (
+          <>
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", gap: 12, marginBottom: 20 }}>
+              <div>
+                <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 24, fontWeight: 900, color: T.text }}>Email Center</h1>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textMuted }}>
+                  Send emails to clients · {emailHistory.length} emails sent
+                </p>
+              </div>
+            </div>
+
+            {/* Follow-up Alert */}
+            {quotesNeedingFollowUp.length > 0 && selectedEmailTemplate !== "follow_up" && (
+              <div style={{ background: T.accentLight, borderRadius: T.radius, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+                <span>⚠️</span>
+                <span style={{ fontSize: 13, color: "#8B6914" }}>
+                  <strong>{quotesNeedingFollowUp.length}</strong> clients need follow-up
+                </span>
+                <button onClick={() => setSelectedEmailTemplate("follow_up")} style={{ marginLeft: "auto", padding: "6px 12px", borderRadius: 6, border: "none", background: "#8B6914", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  View
+                </button>
+              </div>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "300px 1fr", gap: 20 }}>
+              
+              {/* Left Panel - Template & Recipients */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                
+                {/* Template Selector */}
+                <div style={{ background: "#fff", borderRadius: T.radius, padding: "16px", boxShadow: T.shadow }}>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Email Template</label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {Object.values(EMAIL_TEMPLATES).filter(t => t.id !== "quote").map(tmpl => (
+                      <button
+                        key={tmpl.id}
+                        onClick={() => setSelectedEmailTemplate(tmpl.id)}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: T.radiusSm,
+                          border: selectedEmailTemplate === tmpl.id ? `2px solid ${T.primary}` : `1.5px solid ${T.border}`,
+                          background: selectedEmailTemplate === tmpl.id ? T.primaryLight : "#fff",
+                          textAlign: "left",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 16 }}>{tmpl.icon}</span>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 13, color: selectedEmailTemplate === tmpl.id ? T.primaryDark : T.text }}>{tmpl.name}</div>
+                            <div style={{ fontSize: 11, color: T.textMuted }}>{tmpl.description}</div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Custom Email Style Selector (only for custom template) */}
+                {selectedEmailTemplate === "custom" && (
+                  <div style={{ background: "#fff", borderRadius: T.radius, padding: "16px", boxShadow: T.shadow }}>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Email Style</label>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      {Object.values(CUSTOM_EMAIL_STYLES).map(style => (
+                        <button
+                          key={style.id}
+                          onClick={() => setCustomEmailStyle(style.id)}
+                          style={{
+                            padding: "10px",
+                            borderRadius: T.radiusSm,
+                            border: customEmailStyle === style.id ? `2px solid ${style.headerColor}` : `1.5px solid ${T.border}`,
+                            background: customEmailStyle === style.id ? style.accentColor : "#fff",
+                            textAlign: "center",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <div style={{ fontSize: 18, marginBottom: 4 }}>{style.icon}</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: T.text }}>{style.name}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Recipient Filter */}
+                <div style={{ background: "#fff", borderRadius: T.radius, padding: "16px", boxShadow: T.shadow }}>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 10 }}>Filter Recipients</label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {[
+                      { id: "all", label: "All" },
+                      { id: "leads", label: "Leads" },
+                      { id: "quote_sent", label: "Quote Sent" },
+                      { id: "active", label: "Active Clients" },
+                    ].map(f => (
+                      <button
+                        key={f.id}
+                        onClick={() => setRecipientFilter(f.id)}
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: 20,
+                          border: recipientFilter === f.id ? `2px solid ${T.primary}` : `1.5px solid ${T.border}`,
+                          background: recipientFilter === f.id ? T.primaryLight : "#fff",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: recipientFilter === f.id ? T.primaryDark : T.textMuted,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Recipients List */}
+                <div style={{ background: "#fff", borderRadius: T.radius, padding: "16px", boxShadow: T.shadow, flex: 1, minHeight: 200, maxHeight: 400, overflow: "auto" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>
+                      Recipients ({selectedRecipients.length} selected)
+                    </label>
+                    <button
+                      onClick={() => {
+                        const filteredIds = getFilteredEmailRecipients().map(r => r.id);
+                        setSelectedRecipients(prev => 
+                          prev.length === filteredIds.length ? [] : filteredIds
+                        );
+                      }}
+                      style={{ fontSize: 11, color: T.primary, background: "none", border: "none", cursor: "pointer", fontWeight: 700 }}
+                    >
+                      {selectedRecipients.length === getFilteredEmailRecipients().length ? "Deselect All" : "Select All"}
+                    </button>
+                  </div>
+                  
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {getFilteredEmailRecipients().map(recipient => {
+                      const isSelected = selectedRecipients.includes(recipient.id);
+                      const lastEmail = getLastEmailForClient(recipient.id);
+                      const followUp = recipient.quoteSentAt ? getFollowUpStatus(recipient.quoteSentAt) : null;
+                      
+                      return (
+                        <div
+                          key={recipient.id}
+                          onClick={() => setSelectedRecipients(prev => 
+                            isSelected ? prev.filter(id => id !== recipient.id) : [...prev, recipient.id]
+                          )}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: T.radiusSm,
+                            border: isSelected ? `2px solid ${T.primary}` : `1.5px solid ${T.border}`,
+                            background: isSelected ? T.primaryLight : "#fff",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{
+                              width: 18, height: 18, borderRadius: 4,
+                              border: isSelected ? "none" : `2px solid ${T.border}`,
+                              background: isSelected ? T.primary : "#fff",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              color: "#fff", fontSize: 12,
+                            }}>
+                              {isSelected && "✓"}
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{recipient.name}</div>
+                              <div style={{ fontSize: 11, color: T.textMuted }}>{recipient.email || "No email"}</div>
+                            </div>
+                            {followUp && followUp.days >= 3 && (
+                              <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10, fontWeight: 700, background: followUp.level === "urgent" ? T.dangerLight : T.accentLight, color: followUp.color }}>
+                                {followUp.days}d
+                              </span>
+                            )}
+                          </div>
+                          {lastEmail && (
+                            <div style={{ fontSize: 10, color: T.textLight, marginTop: 4, marginLeft: 26 }}>
+                              Last: {EMAIL_TEMPLATES[lastEmail.templateType]?.name || "Email"} · {daysSince(lastEmail.sentAt)}d ago
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {getFilteredEmailRecipients().length === 0 && (
+                      <div style={{ textAlign: "center", padding: 20, color: T.textLight, fontSize: 13 }}>
+                        No recipients match this filter
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Panel - Email Content & Preview */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                
+                {/* Custom Email Builder (only for custom template) */}
+                {selectedEmailTemplate === "custom" && (
+                  <div style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow }}>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", display: "block", marginBottom: 16 }}>Compose Email</label>
+                    
+                    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                      <div>
+                        <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Subject Line</label>
+                        <input
+                          type="text"
+                          value={customEmailContent.subject}
+                          onChange={e => setCustomEmailContent(prev => ({ ...prev, subject: e.target.value }))}
+                          placeholder="e.g. Exciting News from Dust Bunnies! 🌿"
+                          style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+                        />
+                      </div>
+                      
+                      <div>
+                        <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Headline</label>
+                        <input
+                          type="text"
+                          value={customEmailContent.headline}
+                          onChange={e => setCustomEmailContent(prev => ({ ...prev, headline: e.target.value }))}
+                          placeholder="e.g. We're Expanding Our Services!"
+                          style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+                        />
+                      </div>
+                      
+                      <div>
+                        <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Message (use {"{NAME}"} for personalization)</label>
+                        <textarea
+                          value={customEmailContent.message}
+                          onChange={e => setCustomEmailContent(prev => ({ ...prev, message: e.target.value }))}
+                          placeholder="Hey {NAME}!&#10;&#10;We're thrilled to announce..."
+                          rows={5}
+                          style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14, resize: "vertical", lineHeight: 1.6 }}
+                        />
+                      </div>
+                      
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <input
+                          type="checkbox"
+                          checked={customEmailContent.showButton}
+                          onChange={e => setCustomEmailContent(prev => ({ ...prev, showButton: e.target.checked }))}
+                          style={{ width: 18, height: 18 }}
+                        />
+                        <span style={{ fontSize: 13, color: T.text }}>Add call-to-action button</span>
+                      </div>
+                      
+                      {customEmailContent.showButton && (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, paddingLeft: 28 }}>
+                          <div>
+                            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Button Text</label>
+                            <input
+                              type="text"
+                              value={customEmailContent.buttonText}
+                              onChange={e => setCustomEmailContent(prev => ({ ...prev, buttonText: e.target.value }))}
+                              placeholder="Learn More"
+                              style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 13 }}
+                            />
+                          </div>
+                          <div>
+                            <label style={{ fontSize: 11, color: T.textMuted, display: "block", marginBottom: 4 }}>Button Link</label>
+                            <input
+                              type="text"
+                              value={customEmailContent.buttonLink}
+                              onChange={e => setCustomEmailContent(prev => ({ ...prev, buttonLink: e.target.value }))}
+                              placeholder="https://..."
+                              style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 13 }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Email Preview */}
+                <div style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow, flex: 1 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Email Preview</label>
+                    <span style={{ fontSize: 11, color: T.textLight }}>Showing preview for "{selectedRecipients.length > 0 ? getFilteredEmailRecipients().find(r => r.id === selectedRecipients[0])?.name || "Client" : "Client"}"</span>
+                  </div>
+                  
+                  <div style={{ border: `1px solid ${T.border}`, borderRadius: T.radius, overflow: "hidden" }}>
+                    <EmailPreviewComponent
+                      templateType={selectedEmailTemplate}
+                      customStyle={customEmailStyle}
+                      customContent={customEmailContent}
+                      recipientName={selectedRecipients.length > 0 ? getFilteredEmailRecipients().find(r => r.id === selectedRecipients[0])?.name?.split(" ")[0] || "there" : "there"}
+                    />
+                  </div>
+                </div>
+
+                {/* Send Button */}
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button
+                    onClick={() => setShowEmailPreview(true)}
+                    disabled={selectedRecipients.length === 0}
+                    style={{
+                      flex: 1,
+                      padding: "14px",
+                      borderRadius: T.radiusSm,
+                      border: `1.5px solid ${T.border}`,
+                      background: "#fff",
+                      color: selectedRecipients.length === 0 ? T.textLight : T.textMuted,
+                      fontWeight: 700,
+                      fontSize: 14,
+                      cursor: selectedRecipients.length === 0 ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    👁️ Full Preview
+                  </button>
+                  <button
+                    onClick={handleBulkEmailSend}
+                    disabled={selectedRecipients.length === 0 || sendingBulkEmail}
+                    style={{
+                      flex: 2,
+                      padding: "14px",
+                      borderRadius: T.radiusSm,
+                      border: "none",
+                      background: selectedRecipients.length === 0 || sendingBulkEmail ? T.border : `linear-gradient(135deg, ${T.primary}, ${T.blue})`,
+                      color: "#fff",
+                      fontWeight: 700,
+                      fontSize: 14,
+                      cursor: selectedRecipients.length === 0 || sendingBulkEmail ? "not-allowed" : "pointer",
+                      boxShadow: selectedRecipients.length > 0 && !sendingBulkEmail ? "0 4px 12px rgba(74,158,126,0.3)" : "none",
+                    }}
+                  >
+                    {sendingBulkEmail ? "Sending..." : `📧 Send to ${selectedRecipients.length} Recipient${selectedRecipients.length !== 1 ? "s" : ""}`}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Recent Email History */}
+            <div style={{ marginTop: 32 }}>
+              <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 800, color: T.text }}>Recent Emails Sent</h3>
+              {emailHistory.length === 0 ? (
+                <div style={{ background: "#fff", borderRadius: T.radius, padding: "40px", textAlign: "center", color: T.textLight }}>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>📧</div>
+                  <p>No emails sent yet</p>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {emailHistory.slice(0, 10).map(email => (
+                    <div key={email.id} style={{ background: "#fff", borderRadius: T.radiusSm, padding: "12px 16px", boxShadow: T.shadow, display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 18 }}>{EMAIL_TEMPLATES[email.templateType]?.icon || "📧"}</span>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{email.recipientName}</div>
+                        <div style={{ fontSize: 11, color: T.textMuted }}>{EMAIL_TEMPLATES[email.templateType]?.name || "Email"}</div>
+                      </div>
+                      <div style={{ fontSize: 11, color: T.textLight }}>{daysSince(email.sentAt) === 0 ? "Today" : `${daysSince(email.sentAt)}d ago`}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </>
         )}
 
@@ -2294,5 +2894,154 @@ function EditScheduleClientModal({ client, settings, onSave, onDelete, onClose }
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ─── Email Preview Component ───
+function EmailPreviewComponent({ templateType, customStyle, customContent, recipientName }) {
+  const style = CUSTOM_EMAIL_STYLES[customStyle] || CUSTOM_EMAIL_STYLES.announcement;
+  
+  // Render different previews based on template type
+  const renderEmailContent = () => {
+    switch (templateType) {
+      case "follow_up":
+        return (
+          <>
+            <p style={{ margin: "0 0 16px", fontSize: 15, color: "#2C3E36" }}>
+              Hey <strong>{recipientName}</strong>! 👋
+            </p>
+            <p style={{ margin: "0 0 16px", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              Just wanted to check in about the quote we sent through a few days ago. We'd love to help get your home sparkling clean!
+            </p>
+            <p style={{ margin: "0 0 16px", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              If you have any questions at all, or if you'd like to make any changes to the quote, just reply to this email — we're always happy to chat.
+            </p>
+            <div style={{ background: "#E8F5EE", borderRadius: 8, padding: "14px 18px", borderLeft: "4px solid #4A9E7E" }}>
+              <p style={{ margin: 0, fontSize: 14, color: "#2D7A5E", fontWeight: 600 }}>
+                Ready to book? Simply reply "Yes" and we'll get you scheduled! 💚
+              </p>
+            </div>
+          </>
+        );
+      
+      case "review_request":
+        return (
+          <>
+            <p style={{ margin: "0 0 16px", fontSize: 15, color: "#2C3E36" }}>
+              Hey <strong>{recipientName}</strong>! 👋
+            </p>
+            <p style={{ margin: "0 0 16px", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              We hope you've been enjoying your sparkling clean home! We absolutely loved working with you.
+            </p>
+            <p style={{ margin: "0 0 20px", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              If you have a moment, we'd really appreciate a quick Google review. It helps other families find us and means the world to our small team! ⭐
+            </p>
+            <div style={{ textAlign: "center", margin: "20px 0" }}>
+              <div style={{ display: "inline-block", padding: "14px 28px", background: "#4A9E7E", borderRadius: 8, color: "#fff", fontWeight: 700, fontSize: 14 }}>
+                ⭐ Leave a Review
+              </div>
+            </div>
+          </>
+        );
+      
+      case "booking_confirmation":
+        return (
+          <>
+            <p style={{ margin: "0 0 16px", fontSize: 15, color: "#2C3E36" }}>
+              Hey <strong>{recipientName}</strong>! 🎉
+            </p>
+            <p style={{ margin: "0 0 16px", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              Great news — you're all booked in! We can't wait to make your home sparkle.
+            </p>
+            <div style={{ background: "#E8F5EE", borderRadius: 8, padding: "16px 18px", marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: "#7A8F85", marginBottom: 6 }}>YOUR FIRST CLEAN</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#2C3E36" }}>Date & time will be confirmed shortly</div>
+            </div>
+            <p style={{ margin: "0", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              We'll send a reminder the day before. If you need to reschedule, just reply to this email!
+            </p>
+          </>
+        );
+      
+      case "reminder":
+        return (
+          <>
+            <p style={{ margin: "0 0 16px", fontSize: 15, color: "#2C3E36" }}>
+              Hey <strong>{recipientName}</strong>! 👋
+            </p>
+            <p style={{ margin: "0 0 16px", fontSize: 14, color: "#7A8F85", lineHeight: 1.7 }}>
+              Just a friendly reminder that we'll be there <strong>tomorrow</strong> to give your home a beautiful clean! 🏠✨
+            </p>
+            <div style={{ background: "#FFF8E7", borderRadius: 8, padding: "14px 18px", borderLeft: "4px solid #E8C86A", marginBottom: 16 }}>
+              <p style={{ margin: 0, fontSize: 13, color: "#8B6914" }}>
+                <strong>Quick checklist:</strong> Clear surfaces where possible, and let us know if there's anything specific you'd like us to focus on!
+              </p>
+            </div>
+            <p style={{ margin: "0", fontSize: 14, color: "#7A8F85" }}>
+              See you tomorrow! 💚
+            </p>
+          </>
+        );
+      
+      case "custom":
+        return (
+          <>
+            {customContent.headline && (
+              <h2 style={{ margin: "0 0 16px", fontSize: 20, fontWeight: 800, color: "#2C3E36" }}>
+                {customContent.headline}
+              </h2>
+            )}
+            <div style={{ fontSize: 14, color: "#7A8F85", lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
+              {(customContent.message || "Your message will appear here...").replace(/{NAME}/g, recipientName)}
+            </div>
+            {customContent.showButton && customContent.buttonText && (
+              <div style={{ textAlign: "center", margin: "24px 0 8px" }}>
+                <div style={{ display: "inline-block", padding: "14px 28px", background: style.headerColor, borderRadius: 8, color: "#fff", fontWeight: 700, fontSize: 14 }}>
+                  {customContent.buttonText}
+                </div>
+              </div>
+            )}
+          </>
+        );
+      
+      default:
+        return <p style={{ color: "#7A8F85" }}>Select a template to preview</p>;
+    }
+  };
+
+  const headerColor = templateType === "custom" ? style.headerColor : "#1B3A2D";
+  const bannerColor = templateType === "custom" ? style.headerColor : "#4A9E7E";
+
+  return (
+    <div style={{ background: "#F4F8F6" }}>
+      {/* Header */}
+      <div style={{ background: headerColor, padding: "20px 24px", textAlign: "center", color: "#fff" }}>
+        <div style={{ fontSize: 20, marginBottom: 4 }}>🌿</div>
+        <div style={{ fontSize: 16, fontWeight: 800 }}>Dust Bunnies Cleaning</div>
+        <div style={{ fontSize: 11, color: "#8FBFA8", marginTop: 2 }}>Eco-conscious cleaning · Sunshine Coast</div>
+      </div>
+      
+      {/* Banner */}
+      <div style={{ background: bannerColor, padding: "8px 24px", textAlign: "center" }}>
+        <span style={{ color: "#fff", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>
+          {templateType === "follow_up" && "CHECKING IN"}
+          {templateType === "review_request" && "WE'D LOVE YOUR FEEDBACK"}
+          {templateType === "booking_confirmation" && "BOOKING CONFIRMED"}
+          {templateType === "reminder" && "REMINDER"}
+          {templateType === "custom" && (CUSTOM_EMAIL_STYLES[customStyle]?.name?.toUpperCase() || "MESSAGE")}
+        </span>
+      </div>
+      
+      {/* Body */}
+      <div style={{ padding: "24px", background: "#fff" }}>
+        {renderEmailContent()}
+      </div>
+      
+      {/* Footer */}
+      <div style={{ padding: "16px 24px", textAlign: "center", borderTop: "1px solid #E2EBE6" }}>
+        <p style={{ margin: 0, fontSize: 12, color: "#7A8F85" }}>Chat soon! 💚</p>
+        <p style={{ margin: "6px 0 0", fontSize: 11, color: "#A3B5AD" }}>Dust Bunnies Cleaning · Sunshine Coast, QLD</p>
+      </div>
+    </div>
   );
 }

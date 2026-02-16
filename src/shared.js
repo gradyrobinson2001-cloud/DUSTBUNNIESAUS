@@ -16,6 +16,144 @@ export const SERVICED_AREAS = [
   "Buderim", "Alexandra Headland", "Mooloolaba", "Mountain Creek", "Minyama"
 ];
 
+// ═══════════════════════════════════════════════════════════
+// EMAIL TRACKING & HISTORY
+// ═══════════════════════════════════════════════════════════
+
+export function loadEmailHistory() {
+  try {
+    const stored = localStorage.getItem("db_email_history");
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return [];
+}
+
+export function saveEmailHistory(history) {
+  try {
+    localStorage.setItem("db_email_history", JSON.stringify(history));
+  } catch {}
+}
+
+export function addEmailToHistory(entry) {
+  const history = loadEmailHistory();
+  history.unshift({
+    ...entry,
+    id: `email_${Date.now()}`,
+    sentAt: new Date().toISOString(),
+  });
+  // Keep last 500 entries
+  saveEmailHistory(history.slice(0, 500));
+}
+
+export function getClientEmailHistory(clientId) {
+  return loadEmailHistory().filter(e => e.clientId === clientId);
+}
+
+export function getLastEmailForClient(clientId) {
+  const history = loadEmailHistory();
+  return history.find(e => e.clientId === clientId) || null;
+}
+
+// ─── Calculate days since a date ───
+export function daysSince(dateStr) {
+  if (!dateStr) return null;
+  const then = new Date(dateStr);
+  const now = new Date();
+  const diff = Math.floor((now - then) / (1000 * 60 * 60 * 24));
+  return diff;
+}
+
+// ─── Get follow-up status for display ───
+export function getFollowUpStatus(quoteSentAt) {
+  const days = daysSince(quoteSentAt);
+  if (days === null) return null;
+  if (days >= 7) return { level: "urgent", days, label: `${days}d - Urgent!`, color: "#D4645C" };
+  if (days >= 3) return { level: "warning", days, label: `${days}d - Follow up`, color: "#E8C86A" };
+  return { level: "ok", days, label: `${days}d ago`, color: "#7A8F85" };
+}
+
+// ─── Email template types ───
+export const EMAIL_TEMPLATES = {
+  quote: {
+    id: "quote",
+    name: "Quote",
+    icon: "💰",
+    description: "Send pricing quote to client",
+    subject: "Your Cleaning Quote is Ready! 🌿 — Dust Bunnies Cleaning",
+  },
+  follow_up: {
+    id: "follow_up",
+    name: "Follow-up",
+    icon: "📩",
+    description: "Chase quotes sent 3+ days ago",
+    subject: "Just checking in! 🌿 — Dust Bunnies Cleaning",
+  },
+  review_request: {
+    id: "review_request",
+    name: "Review Request",
+    icon: "⭐",
+    description: "Ask happy clients for a Google review",
+    subject: "Loved your clean? We'd love a review! ⭐",
+  },
+  booking_confirmation: {
+    id: "booking_confirmation",
+    name: "Booking Confirmation",
+    icon: "✅",
+    description: "Confirm when a quote is accepted",
+    subject: "You're booked in! 🎉 — Dust Bunnies Cleaning",
+  },
+  reminder: {
+    id: "reminder",
+    name: "Reminder",
+    icon: "🔔",
+    description: "Day-before clean reminder",
+    subject: "See you tomorrow! 🌿 — Dust Bunnies Cleaning",
+  },
+  custom: {
+    id: "custom",
+    name: "Custom Email",
+    icon: "✏️",
+    description: "Create your own message",
+    subject: "",
+  },
+};
+
+// ─── Custom email styles ───
+export const CUSTOM_EMAIL_STYLES = {
+  announcement: {
+    id: "announcement",
+    name: "Announcement",
+    icon: "📢",
+    description: "News, updates, new services",
+    headerColor: "#4A9E7E",
+    accentColor: "#E8F5EE",
+  },
+  promotion: {
+    id: "promotion",
+    name: "Promotion",
+    icon: "🎉",
+    description: "Discounts, offers, deals",
+    headerColor: "#E8C86A",
+    accentColor: "#FFF8E7",
+  },
+  thank_you: {
+    id: "thank_you",
+    name: "Thank You",
+    icon: "💚",
+    description: "Appreciation, milestones",
+    headerColor: "#5B9EC4",
+    accentColor: "#E6F0F7",
+  },
+  simple: {
+    id: "simple",
+    name: "Simple Note",
+    icon: "📝",
+    description: "Quick personal message",
+    headerColor: "#1B3A2D",
+    accentColor: "#F4F8F6",
+  },
+};
+
 // ─── Default Pricing (used if nothing in localStorage) ───
 export const DEFAULT_PRICING = {
   bedroom: { price: 25, unit: "per room", icon: "🛏️", label: "Bedroom", category: "room" },
