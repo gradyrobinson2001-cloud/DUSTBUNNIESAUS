@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS, loadEmailHistory, saveEmailHistory, addEmailToHistory, getLastEmailForClient, daysSince, getFollowUpStatus, EMAIL_TEMPLATES, CUSTOM_EMAIL_STYLES } from "./shared";
+import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS, loadEmailHistory, saveEmailHistory, addEmailToHistory, getLastEmailForClient, daysSince, getFollowUpStatus, EMAIL_TEMPLATES, CUSTOM_EMAIL_STYLES, SUBURB_COORDS, getClientCoords } from "./shared";
 import emailjs from '@emailjs/browser';
 
 // ─── EmailJS Config ───
@@ -7,6 +7,9 @@ const EMAILJS_SERVICE_ID = "service_v0w9y88";
 const EMAILJS_TEMPLATE_ID = "template_mbaynwc"; // Quote emails
 const EMAILJS_UNIVERSAL_TEMPLATE_ID = "template_kgstqkg"; // All other emails
 const EMAILJS_PUBLIC_KEY = "MZs9Wz8jaU2en7Pdd";
+
+// ─── Google Maps Config ───
+const GOOGLE_MAPS_API_KEY = "AIzaSyAI5KlcXZB9gs1u4Qb95SSsrQZM60aDuhI";
 
 // ═══════════════════════════════════════════════════════════
 // DUST BUNNIES CLEANING — Admin Dashboard (Mobile-Ready)
@@ -137,6 +140,17 @@ export default function Dashboard() {
   });
   const [showEmailPreview, setShowEmailPreview] = useState(false);
   const [sendingBulkEmail, setSendingBulkEmail] = useState(false);
+  
+  // Tools/Maps state
+  const [distanceFrom, setDistanceFrom] = useState("");
+  const [distanceTo, setDistanceTo] = useState("");
+  const [distanceResult, setDistanceResult] = useState(null);
+  const [calculatingDistance, setCalculatingDistance] = useState(false);
+  const [selectedRouteDate, setSelectedRouteDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [routeData, setRouteData] = useState(null);
+  const [mapsLoaded, setMapsLoaded] = useState(false);
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
   
   const [filter, setFilter] = useState("active");
   const [searchTerm, setSearchTerm] = useState("");
@@ -749,6 +763,251 @@ export default function Dashboard() {
     return EMAILJS_UNIVERSAL_TEMPLATE_ID;
   };
 
+  // ─── Google Maps Functions ───
+  
+  // Load Google Maps Script
+  useEffect(() => {
+    if (window.google?.maps) {
+      setMapsLoaded(true);
+      return;
+    }
+    
+    if (GOOGLE_MAPS_API_KEY === "YOUR_API_KEY_HERE") {
+      console.log("Google Maps API key not configured");
+      return;
+    }
+    
+    const script = document.createElement("script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=places`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => setMapsLoaded(true);
+    document.head.appendChild(script);
+    
+    return () => {
+      // Cleanup if needed
+    };
+  }, []);
+
+  const calculateDistanceBetween = async (fromClient, toClient) => {
+    if (!mapsLoaded || !window.google?.maps) {
+      // Fallback to straight-line distance
+      const from = getClientCoords(fromClient);
+      const to = getClientCoords(toClient);
+      const distance = haversineDistance(from, to);
+      const estimatedTime = Math.round(distance / 40 * 60); // Assume 40km/h average
+      return {
+        distance: distance.toFixed(1),
+        duration: estimatedTime,
+        durationText: `~${estimatedTime} mins`,
+        distanceText: `${distance.toFixed(1)} km`,
+        method: "estimate"
+      };
+    }
+    
+    return new Promise((resolve, reject) => {
+      const service = new window.google.maps.DistanceMatrixService();
+      
+      const fromAddr = fromClient.address || `${fromClient.suburb}, QLD, Australia`;
+      const toAddr = toClient.address || `${toClient.suburb}, QLD, Australia`;
+      
+      service.getDistanceMatrix({
+        origins: [fromAddr],
+        destinations: [toAddr],
+        travelMode: window.google.maps.TravelMode.DRIVING,
+        unitSystem: window.google.maps.UnitSystem.METRIC,
+      }, (response, status) => {
+        if (status === "OK" && response.rows[0]?.elements[0]?.status === "OK") {
+          const element = response.rows[0].elements[0];
+          resolve({
+            distance: (element.distance.value / 1000).toFixed(1),
+            duration: Math.round(element.duration.value / 60),
+            durationText: element.duration.text,
+            distanceText: element.distance.text,
+            method: "google"
+          });
+        } else {
+          // Fallback to estimate
+          const from = getClientCoords(fromClient);
+          const to = getClientCoords(toClient);
+          const distance = haversineDistance(from, to);
+          const estimatedTime = Math.round(distance / 40 * 60);
+          resolve({
+            distance: distance.toFixed(1),
+            duration: estimatedTime,
+            durationText: `~${estimatedTime} mins`,
+            distanceText: `${distance.toFixed(1)} km`,
+            method: "estimate"
+          });
+        }
+      });
+    });
+  };
+
+  // Haversine formula for straight-line distance
+  const haversineDistance = (coord1, coord2) => {
+    const R = 6371; // Earth's radius in km
+    const dLat = (coord2.lat - coord1.lat) * Math.PI / 180;
+    const dLon = (coord2.lng - coord1.lng) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(coord1.lat * Math.PI / 180) * Math.cos(coord2.lat * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c * 1.3; // Multiply by 1.3 to approximate road distance
+  };
+
+  const handleDistanceCalculation = async () => {
+    if (!distanceFrom || !distanceTo) return;
+    
+    const fromClient = scheduleClients.find(c => c.id === distanceFrom);
+    const toClient = scheduleClients.find(c => c.id === distanceTo);
+    
+    if (!fromClient || !toClient) return;
+    
+    setCalculatingDistance(true);
+    try {
+      const result = await calculateDistanceBetween(fromClient, toClient);
+      setDistanceResult({
+        ...result,
+        from: fromClient,
+        to: toClient
+      });
+    } catch (error) {
+      console.error("Distance calculation error:", error);
+      showToast("❌ Failed to calculate distance");
+    } finally {
+      setCalculatingDistance(false);
+    }
+  };
+
+  const calculateRouteForDate = async (date) => {
+    const jobsOnDate = scheduledJobs.filter(j => j.date === date && !j.isBreak);
+    
+    const teamAJobs = jobsOnDate.filter(j => j.teamId === "team_a").sort((a, b) => a.startTime.localeCompare(b.startTime));
+    const teamBJobs = jobsOnDate.filter(j => j.teamId === "team_b").sort((a, b) => a.startTime.localeCompare(b.startTime));
+    
+    const calculateTeamRoute = async (jobs) => {
+      if (jobs.length < 2) return { totalDistance: 0, totalDuration: 0, legs: [] };
+      
+      const legs = [];
+      let totalDistance = 0;
+      let totalDuration = 0;
+      
+      for (let i = 0; i < jobs.length - 1; i++) {
+        const fromClient = scheduleClients.find(c => c.id === jobs[i].clientId);
+        const toClient = scheduleClients.find(c => c.id === jobs[i + 1].clientId);
+        
+        if (fromClient && toClient) {
+          const result = await calculateDistanceBetween(fromClient, toClient);
+          legs.push({
+            from: jobs[i],
+            to: jobs[i + 1],
+            ...result
+          });
+          totalDistance += parseFloat(result.distance);
+          totalDuration += result.duration;
+        }
+      }
+      
+      return { totalDistance, totalDuration, legs, jobs };
+    };
+    
+    const [teamARoute, teamBRoute] = await Promise.all([
+      calculateTeamRoute(teamAJobs),
+      calculateTeamRoute(teamBJobs)
+    ]);
+    
+    setRouteData({
+      date,
+      teamA: teamARoute,
+      teamB: teamBRoute
+    });
+  };
+
+  // Initialize map for route visualization
+  const initializeMap = useCallback(() => {
+    if (!mapsLoaded || !mapRef.current || !window.google?.maps) return;
+    
+    if (!mapInstanceRef.current) {
+      mapInstanceRef.current = new window.google.maps.Map(mapRef.current, {
+        center: { lat: -26.6590, lng: 153.0800 }, // Sunshine Coast center
+        zoom: 12,
+        styles: [
+          { featureType: "poi", stylers: [{ visibility: "off" }] },
+          { featureType: "transit", stylers: [{ visibility: "off" }] },
+        ],
+      });
+    }
+  }, [mapsLoaded]);
+
+  const drawRouteOnMap = useCallback(async () => {
+    if (!mapInstanceRef.current || !routeData || !window.google?.maps) return;
+    
+    const map = mapInstanceRef.current;
+    
+    // Clear existing overlays
+    // Note: In production, we'd track and clear markers/polylines properly
+    
+    const directionsService = new window.google.maps.DirectionsService();
+    const bounds = new window.google.maps.LatLngBounds();
+    
+    const drawTeamRoute = async (teamRoute, color, label) => {
+      if (!teamRoute.jobs || teamRoute.jobs.length < 2) return;
+      
+      const waypoints = teamRoute.jobs.slice(1, -1).map(job => {
+        const client = scheduleClients.find(c => c.id === job.clientId);
+        const addr = client?.address || `${job.suburb}, QLD, Australia`;
+        return { location: addr, stopover: true };
+      });
+      
+      const firstClient = scheduleClients.find(c => c.id === teamRoute.jobs[0].clientId);
+      const lastClient = scheduleClients.find(c => c.id === teamRoute.jobs[teamRoute.jobs.length - 1].clientId);
+      
+      const origin = firstClient?.address || `${teamRoute.jobs[0].suburb}, QLD, Australia`;
+      const destination = lastClient?.address || `${teamRoute.jobs[teamRoute.jobs.length - 1].suburb}, QLD, Australia`;
+      
+      try {
+        directionsService.route({
+          origin,
+          destination,
+          waypoints,
+          travelMode: window.google.maps.TravelMode.DRIVING,
+          optimizeWaypoints: false,
+        }, (result, status) => {
+          if (status === "OK") {
+            new window.google.maps.DirectionsRenderer({
+              map,
+              directions: result,
+              suppressMarkers: false,
+              polylineOptions: {
+                strokeColor: color,
+                strokeWeight: 4,
+                strokeOpacity: 0.8,
+              },
+            });
+            
+            // Extend bounds
+            result.routes[0].legs.forEach(leg => {
+              bounds.extend(leg.start_location);
+              bounds.extend(leg.end_location);
+            });
+            map.fitBounds(bounds);
+          }
+        });
+      } catch (error) {
+        console.error(`Error drawing ${label} route:`, error);
+      }
+    };
+    
+    // Draw both team routes
+    const teamA = scheduleSettings.teams.find(t => t.id === "team_a");
+    const teamB = scheduleSettings.teams.find(t => t.id === "team_b");
+    
+    await drawTeamRoute(routeData.teamA, teamA?.color || "#4A9E7E", "Team A");
+    await drawTeamRoute(routeData.teamB, teamB?.color || "#5B9EC4", "Team B");
+    
+  }, [routeData, scheduleClients, scheduleSettings.teams]);
+
   // ─── Filtered Enquiries ───
   const filtered = enquiries.filter(e => {
     // First apply archive filter
@@ -795,6 +1054,7 @@ export default function Dashboard() {
     { id: "quotes", label: "Quotes", icon: "💰", badge: pendingQuotes.length },
     { id: "calendar", label: "Calendar", icon: "📅", badge: 0 },
     { id: "emails", label: "Email Center", icon: "📧", badge: quotesNeedingFollowUp.length },
+    { id: "tools", label: "Tools", icon: "🗺️", badge: 0 },
     { id: "clients", label: "Clients", icon: "👥", badge: clients.length },
     { id: "templates", label: "Templates", icon: "💬", badge: 0 },
     { id: "form", label: "Customer Form", icon: "📋", badge: 0 },
@@ -1470,6 +1730,298 @@ export default function Dashboard() {
                       <div style={{ fontSize: 11, color: T.textLight }}>{daysSince(email.sentAt) === 0 ? "Today" : `${daysSince(email.sentAt)}d ago`}</div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ─── TOOLS PAGE ─── */}
+        {page === "tools" && (
+          <>
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", gap: 12, marginBottom: 20 }}>
+              <div>
+                <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 24, fontWeight: 900, color: T.text }}>Tools</h1>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textMuted }}>
+                  Distance calculator & route planning
+                </p>
+              </div>
+              {!mapsLoaded && GOOGLE_MAPS_API_KEY !== "YOUR_API_KEY_HERE" && (
+                <div style={{ padding: "8px 16px", background: T.accentLight, borderRadius: T.radiusSm, fontSize: 12, color: "#8B6914" }}>
+                  Loading Maps...
+                </div>
+              )}
+              {GOOGLE_MAPS_API_KEY === "YOUR_API_KEY_HERE" && (
+                <div style={{ padding: "8px 16px", background: T.dangerLight, borderRadius: T.radiusSm, fontSize: 12, color: T.danger }}>
+                  ⚠️ Add Google Maps API key to enable
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 20 }}>
+              
+              {/* Distance Calculator */}
+              <div style={{ background: "#fff", borderRadius: T.radius, padding: "24px", boxShadow: T.shadow }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+                  <span style={{ fontSize: 24 }}>📏</span>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: T.text }}>Distance Calculator</h3>
+                    <p style={{ margin: "2px 0 0", fontSize: 12, color: T.textMuted }}>Check distance between any two clients</p>
+                  </div>
+                </div>
+                
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>FROM</label>
+                    <select
+                      value={distanceFrom}
+                      onChange={e => setDistanceFrom(e.target.value)}
+                      style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+                    >
+                      <option value="">Select client...</option>
+                      {scheduleClients.filter(c => c.status === "active").map(c => (
+                        <option key={c.id} value={c.id}>{c.name} — {c.suburb}</option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  <div style={{ display: "flex", justifyContent: "center" }}>
+                    <button
+                      onClick={() => {
+                        const temp = distanceFrom;
+                        setDistanceFrom(distanceTo);
+                        setDistanceTo(temp);
+                      }}
+                      style={{ padding: "8px 16px", borderRadius: 20, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, cursor: "pointer", color: T.textMuted }}
+                    >
+                      ↕️ Swap
+                    </button>
+                  </div>
+                  
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>TO</label>
+                    <select
+                      value={distanceTo}
+                      onChange={e => setDistanceTo(e.target.value)}
+                      style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+                    >
+                      <option value="">Select client...</option>
+                      {scheduleClients.filter(c => c.status === "active" && c.id !== distanceFrom).map(c => (
+                        <option key={c.id} value={c.id}>{c.name} — {c.suburb}</option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  <button
+                    onClick={handleDistanceCalculation}
+                    disabled={!distanceFrom || !distanceTo || calculatingDistance}
+                    style={{
+                      padding: "14px",
+                      borderRadius: T.radiusSm,
+                      border: "none",
+                      background: (!distanceFrom || !distanceTo || calculatingDistance) ? T.border : T.primary,
+                      color: "#fff",
+                      fontWeight: 700,
+                      fontSize: 14,
+                      cursor: (!distanceFrom || !distanceTo || calculatingDistance) ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {calculatingDistance ? "Calculating..." : "📍 Calculate Distance"}
+                  </button>
+                </div>
+                
+                {/* Result */}
+                {distanceResult && (
+                  <div style={{ marginTop: 20, background: T.primaryLight, borderRadius: T.radius, padding: "20px", textAlign: "center" }}>
+                    <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 8 }}>
+                      {distanceResult.from.name} → {distanceResult.to.name}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "center", gap: 24 }}>
+                      <div>
+                        <div style={{ fontSize: 28, fontWeight: 900, color: T.primary }}>{distanceResult.distanceText}</div>
+                        <div style={{ fontSize: 12, color: T.textMuted }}>distance</div>
+                      </div>
+                      <div style={{ width: 1, background: T.border }} />
+                      <div>
+                        <div style={{ fontSize: 28, fontWeight: 900, color: T.blue }}>{distanceResult.durationText}</div>
+                        <div style={{ fontSize: 12, color: T.textMuted }}>drive time</div>
+                      </div>
+                    </div>
+                    {distanceResult.method === "estimate" && (
+                      <div style={{ marginTop: 12, fontSize: 11, color: T.textLight }}>
+                        ℹ️ Estimated based on suburb locations
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Stats */}
+              <div style={{ background: "#fff", borderRadius: T.radius, padding: "24px", boxShadow: T.shadow }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+                  <span style={{ fontSize: 24 }}>📊</span>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: T.text }}>Quick Stats</h3>
+                    <p style={{ margin: "2px 0 0", fontSize: 12, color: T.textMuted }}>Overview of your service area</p>
+                  </div>
+                </div>
+                
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  {Object.entries(
+                    scheduleClients.filter(c => c.status === "active").reduce((acc, c) => {
+                      acc[c.suburb] = (acc[c.suburb] || 0) + 1;
+                      return acc;
+                    }, {})
+                  ).sort((a, b) => b[1] - a[1]).map(([suburb, count]) => (
+                    <div key={suburb} style={{ padding: "12px 14px", background: T.bg, borderRadius: T.radiusSm }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{suburb}</div>
+                      <div style={{ fontSize: 12, color: T.textMuted }}>{count} client{count > 1 ? "s" : ""}</div>
+                    </div>
+                  ))}
+                </div>
+                
+                {scheduleClients.filter(c => c.status === "active").length === 0 && (
+                  <div style={{ textAlign: "center", padding: 20, color: T.textLight }}>
+                    No active clients yet
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Route Visualizer */}
+            <div style={{ marginTop: 24, background: "#fff", borderRadius: T.radius, padding: "24px", boxShadow: T.shadow }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 24 }}>🗺️</span>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: T.text }}>Route Visualizer</h3>
+                    <p style={{ margin: "2px 0 0", fontSize: 12, color: T.textMuted }}>View team routes on the map</p>
+                  </div>
+                </div>
+                
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <input
+                    type="date"
+                    value={selectedRouteDate}
+                    onChange={e => setSelectedRouteDate(e.target.value)}
+                    style={{ padding: "10px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+                  />
+                  <button
+                    onClick={() => calculateRouteForDate(selectedRouteDate)}
+                    style={{ padding: "10px 20px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+                  >
+                    Load Routes
+                  </button>
+                </div>
+              </div>
+              
+              {/* Route Summary Cards */}
+              {routeData && (
+                <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 20 }}>
+                  {/* Team A Summary */}
+                  <div style={{ padding: "16px 20px", background: `${scheduleSettings.teams[0]?.color}15`, borderRadius: T.radius, borderLeft: `4px solid ${scheduleSettings.teams[0]?.color}` }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 8 }}>
+                      {scheduleSettings.teams[0]?.name || "Team A"}
+                    </div>
+                    <div style={{ display: "flex", gap: 16, fontSize: 13 }}>
+                      <span style={{ color: T.textMuted }}>
+                        🚗 <strong style={{ color: T.text }}>{routeData.teamA.totalDistance.toFixed(1)} km</strong>
+                      </span>
+                      <span style={{ color: T.textMuted }}>
+                        ⏱️ <strong style={{ color: T.text }}>{routeData.teamA.totalDuration} mins</strong>
+                      </span>
+                      <span style={{ color: T.textMuted }}>
+                        📍 <strong style={{ color: T.text }}>{routeData.teamA.jobs?.length || 0} stops</strong>
+                      </span>
+                    </div>
+                    {routeData.teamA.legs?.length > 0 && (
+                      <div style={{ marginTop: 12, fontSize: 12 }}>
+                        {routeData.teamA.legs.map((leg, i) => (
+                          <div key={i} style={{ padding: "6px 0", borderBottom: i < routeData.teamA.legs.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                            <span style={{ color: T.text }}>{leg.from.clientName}</span>
+                            <span style={{ color: T.textLight }}> → </span>
+                            <span style={{ color: T.text }}>{leg.to.clientName}</span>
+                            <span style={{ color: T.textMuted, marginLeft: 8 }}>{leg.distanceText} · {leg.durationText}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Team B Summary */}
+                  <div style={{ padding: "16px 20px", background: `${scheduleSettings.teams[1]?.color}15`, borderRadius: T.radius, borderLeft: `4px solid ${scheduleSettings.teams[1]?.color}` }}>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 8 }}>
+                      {scheduleSettings.teams[1]?.name || "Team B"}
+                    </div>
+                    <div style={{ display: "flex", gap: 16, fontSize: 13 }}>
+                      <span style={{ color: T.textMuted }}>
+                        🚗 <strong style={{ color: T.text }}>{routeData.teamB.totalDistance.toFixed(1)} km</strong>
+                      </span>
+                      <span style={{ color: T.textMuted }}>
+                        ⏱️ <strong style={{ color: T.text }}>{routeData.teamB.totalDuration} mins</strong>
+                      </span>
+                      <span style={{ color: T.textMuted }}>
+                        📍 <strong style={{ color: T.text }}>{routeData.teamB.jobs?.length || 0} stops</strong>
+                      </span>
+                    </div>
+                    {routeData.teamB.legs?.length > 0 && (
+                      <div style={{ marginTop: 12, fontSize: 12 }}>
+                        {routeData.teamB.legs.map((leg, i) => (
+                          <div key={i} style={{ padding: "6px 0", borderBottom: i < routeData.teamB.legs.length - 1 ? `1px solid ${T.border}` : "none" }}>
+                            <span style={{ color: T.text }}>{leg.from.clientName}</span>
+                            <span style={{ color: T.textLight }}> → </span>
+                            <span style={{ color: T.text }}>{leg.to.clientName}</span>
+                            <span style={{ color: T.textMuted, marginLeft: 8 }}>{leg.distanceText} · {leg.durationText}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              {/* Map Container */}
+              <div
+                ref={mapRef}
+                style={{
+                  width: "100%",
+                  height: 400,
+                  borderRadius: T.radius,
+                  background: T.bg,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                {!mapsLoaded && (
+                  <div style={{ textAlign: "center", color: T.textMuted }}>
+                    {GOOGLE_MAPS_API_KEY === "YOUR_API_KEY_HERE" ? (
+                      <>
+                        <div style={{ fontSize: 40, marginBottom: 12 }}>🗺️</div>
+                        <p style={{ margin: 0, fontWeight: 700 }}>Google Maps API Key Required</p>
+                        <p style={{ margin: "8px 0 0", fontSize: 13 }}>Add your API key to enable the map</p>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+                        <p>Loading map...</p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              {/* Map Legend */}
+              {mapsLoaded && routeData && (
+                <div style={{ display: "flex", gap: 20, marginTop: 16, justifyContent: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 24, height: 4, borderRadius: 2, background: scheduleSettings.teams[0]?.color }} />
+                    <span style={{ fontSize: 12, color: T.textMuted }}>{scheduleSettings.teams[0]?.name}</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 24, height: 4, borderRadius: 2, background: scheduleSettings.teams[1]?.color }} />
+                    <span style={{ fontSize: 12, color: T.textMuted }}>{scheduleSettings.teams[1]?.name}</span>
+                  </div>
                 </div>
               )}
             </div>
@@ -2743,6 +3295,7 @@ function EditScheduleClientModal({ client, settings, onSave, onDelete, onClose }
     name: client.name || "",
     email: client.email || "",
     phone: client.phone || "",
+    address: client.address || "",
     suburb: client.suburb || SERVICED_AREAS[0],
     bedrooms: client.bedrooms || 3,
     bathrooms: client.bathrooms || 2,
@@ -2778,6 +3331,17 @@ function EditScheduleClientModal({ client, settings, onSave, onDelete, onClose }
               {SERVICED_AREAS.map(a => <option key={a} value={a}>{a}</option>)}
             </select>
           </div>
+        </div>
+
+        {/* Full Address */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>FULL ADDRESS (for accurate distance)</label>
+          <input type="text" value={local.address} onChange={e => u("address", e.target.value)} 
+            placeholder="e.g. 123 Smith Street, Buderim QLD 4556"
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }} />
+          <p style={{ margin: "6px 0 0", fontSize: 11, color: T.textLight }}>
+            Used for precise route calculations. Leave blank to use suburb center.
+          </p>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>

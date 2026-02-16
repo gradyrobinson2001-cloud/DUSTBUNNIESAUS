@@ -16,6 +16,30 @@ export const SERVICED_AREAS = [
   "Buderim", "Alexandra Headland", "Mooloolaba", "Mountain Creek", "Minyama"
 ];
 
+// ─── Suburb coordinates (fallback when no address) ───
+export const SUBURB_COORDS = {
+  "Twin Waters": { lat: -26.6275, lng: 153.0853 },
+  "Maroochydore": { lat: -26.6590, lng: 153.0997 },
+  "Kuluin": { lat: -26.6567, lng: 153.0486 },
+  "Forest Glen": { lat: -26.6833, lng: 153.0167 },
+  "Mons": { lat: -26.7167, lng: 153.0333 },
+  "Buderim": { lat: -26.6844, lng: 153.0500 },
+  "Alexandra Headland": { lat: -26.6678, lng: 153.1031 },
+  "Mooloolaba": { lat: -26.6817, lng: 153.1192 },
+  "Mountain Creek": { lat: -26.6933, lng: 153.0972 },
+  "Minyama": { lat: -26.6833, lng: 153.1167 },
+};
+
+// ─── Get coordinates for a client ───
+export function getClientCoords(client) {
+  // If client has geocoded coordinates, use those
+  if (client.lat && client.lng) {
+    return { lat: client.lat, lng: client.lng };
+  }
+  // Otherwise fall back to suburb center
+  return SUBURB_COORDS[client.suburb] || { lat: -26.6590, lng: 153.0997 }; // Default to Maroochydore
+}
+
 // ═══════════════════════════════════════════════════════════
 // EMAIL TRACKING & HISTORY
 // ═══════════════════════════════════════════════════════════
@@ -508,6 +532,19 @@ const DEMO_NAMES = [
   "Victoria Morgan", "Daniel Evans", "Penelope Shaw", "Matthew Ross", "Aria Hughes"
 ];
 
+const DEMO_ADDRESSES = {
+  "Buderim": ["12 Mountain View Rd", "45 Lindsay Rd", "78 Main St", "23 King St", "56 Church St", "89 Mill Rd"],
+  "Maroochydore": ["15 Ocean Parade", "28 Duporth Ave", "41 Cotton Tree Pde", "67 First Ave", "93 Sixth Ave"],
+  "Kuluin": ["8 Kuluin Way", "34 Dixon Rd", "51 Kiel Mountain Rd", "72 Jones Rd"],
+  "Mooloolaba": ["5 Esplanade", "19 Brisbane Rd", "32 Parkyn Pde", "58 Meta St"],
+  "Alexandra Headland": ["11 Pacific Tce", "26 Okinja Rd", "43 Alexandra Pde"],
+  "Twin Waters": ["7 Oceanside Dr", "21 Marina Quay", "38 Cove Blvd"],
+  "Mountain Creek": ["14 Karawatha Dr", "29 Creekside Cct", "46 Parklands Blvd"],
+  "Minyama": ["9 Minyama Esp", "22 Jessica Blvd", "35 Wises Rd"],
+  "Forest Glen": ["6 Forest Glen Rd", "18 Mons School Rd", "31 Panorama Dr"],
+  "Mons": ["4 Mons Rd", "16 Mooloolah Connection Rd"],
+};
+
 const DEMO_NOTES = [
   "2 dogs, keep gate closed",
   "Key under front mat",
@@ -538,6 +575,9 @@ export function generateDemoClients(count = 45) {
 
   const shuffledNames = [...DEMO_NAMES].sort(() => Math.random() - 0.5);
   const allSuburbs = [...SERVICED_AREAS];
+  
+  // Track used addresses per suburb to avoid duplicates
+  const usedAddresses = {};
 
   for (let i = 0; i < count; i++) {
     const name = shuffledNames[i] || `Client ${i + 1}`;
@@ -548,6 +588,13 @@ export function generateDemoClients(count = 45) {
     const bathrooms = 1 + Math.floor(Math.random() * 2); // 1-2
     const living = 1 + Math.floor(Math.random() * 2); // 1-2
     const kitchen = 1;
+    
+    // Generate address
+    if (!usedAddresses[suburb]) usedAddresses[suburb] = 0;
+    const suburbAddresses = DEMO_ADDRESSES[suburb] || [];
+    const streetAddress = suburbAddresses[usedAddresses[suburb] % suburbAddresses.length] || `${Math.floor(Math.random() * 100) + 1} Main St`;
+    usedAddresses[suburb]++;
+    const fullAddress = `${streetAddress}, ${suburb} QLD 4556`;
     
     // Assign preferred day based on suburb (for clustering)
     const dayMap = {
@@ -567,6 +614,7 @@ export function generateDemoClients(count = 45) {
       name,
       email: name.toLowerCase().replace(" ", ".") + "@email.com",
       phone: "04" + Math.floor(10000000 + Math.random() * 90000000),
+      address: fullAddress,
       suburb,
       bedrooms,
       bathrooms,
