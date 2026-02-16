@@ -533,16 +533,62 @@ const DEMO_NAMES = [
 ];
 
 const DEMO_ADDRESSES = {
-  "Buderim": ["12 Mountain View Rd", "45 Lindsay Rd", "78 Main St", "23 King St", "56 Church St", "89 Mill Rd"],
-  "Maroochydore": ["15 Ocean Parade", "28 Duporth Ave", "41 Cotton Tree Pde", "67 First Ave", "93 Sixth Ave"],
-  "Kuluin": ["8 Kuluin Way", "34 Dixon Rd", "51 Kiel Mountain Rd", "72 Jones Rd"],
-  "Mooloolaba": ["5 Esplanade", "19 Brisbane Rd", "32 Parkyn Pde", "58 Meta St"],
-  "Alexandra Headland": ["11 Pacific Tce", "26 Okinja Rd", "43 Alexandra Pde"],
-  "Twin Waters": ["7 Oceanside Dr", "21 Marina Quay", "38 Cove Blvd"],
-  "Mountain Creek": ["14 Karawatha Dr", "29 Creekside Cct", "46 Parklands Blvd"],
-  "Minyama": ["9 Minyama Esp", "22 Jessica Blvd", "35 Wises Rd"],
-  "Forest Glen": ["6 Forest Glen Rd", "18 Mons School Rd", "31 Panorama Dr"],
-  "Mons": ["4 Mons Rd", "16 Mooloolah Connection Rd"],
+  "Buderim": [
+    "5 Lindsay Road, Buderim QLD 4556",
+    "23 Ballinger Crescent, Buderim QLD 4556",
+    "18 Gloucester Road, Buderim QLD 4556",
+    "42 King Street, Buderim QLD 4556",
+    "7 Burnett Street, Buderim QLD 4556",
+    "31 Church Street, Buderim QLD 4556"
+  ],
+  "Maroochydore": [
+    "15 Duporth Avenue, Maroochydore QLD 4558",
+    "28 Sixth Avenue, Maroochydore QLD 4558",
+    "3 Beach Road, Maroochydore QLD 4558",
+    "45 Aerodrome Road, Maroochydore QLD 4558",
+    "12 Plaza Parade, Maroochydore QLD 4558"
+  ],
+  "Kuluin": [
+    "8 Nambour Connection Road, Kuluin QLD 4558",
+    "22 Dixon Road, Kuluin QLD 4558",
+    "35 Kiel Mountain Road, Kuluin QLD 4558",
+    "14 Jones Road, Kuluin QLD 4558"
+  ],
+  "Mooloolaba": [
+    "5 Parkyn Parade, Mooloolaba QLD 4557",
+    "19 Brisbane Road, Mooloolaba QLD 4557",
+    "32 Smith Street, Mooloolaba QLD 4557",
+    "48 Walan Street, Mooloolaba QLD 4557"
+  ],
+  "Alexandra Headland": [
+    "11 Pacific Terrace, Alexandra Headland QLD 4572",
+    "26 Okinja Road, Alexandra Headland QLD 4572",
+    "8 Alexandra Parade, Alexandra Headland QLD 4572"
+  ],
+  "Twin Waters": [
+    "7 Dodonaea Close, Twin Waters QLD 4564",
+    "21 Cove Boulevard, Twin Waters QLD 4564",
+    "38 Oceanside Drive, Twin Waters QLD 4564"
+  ],
+  "Mountain Creek": [
+    "14 Karawatha Drive, Mountain Creek QLD 4557",
+    "29 Glenfields Boulevard, Mountain Creek QLD 4557",
+    "46 Mountain Ash Drive, Mountain Creek QLD 4557"
+  ],
+  "Minyama": [
+    "9 Jessica Boulevard, Minyama QLD 4575",
+    "22 Doyles Road, Minyama QLD 4575",
+    "35 Wises Road, Minyama QLD 4575"
+  ],
+  "Forest Glen": [
+    "6 Doolan Street, Forest Glen QLD 4556",
+    "18 Mons School Road, Forest Glen QLD 4556",
+    "31 Panorama Drive, Forest Glen QLD 4556"
+  ],
+  "Mons": [
+    "4 Doolan Street, Mons QLD 4556",
+    "16 Mooloolah Connection Road, Mons QLD 4556"
+  ],
 };
 
 const DEMO_NOTES = [
@@ -589,12 +635,11 @@ export function generateDemoClients(count = 45) {
     const living = 1 + Math.floor(Math.random() * 2); // 1-2
     const kitchen = 1;
     
-    // Generate address
+    // Generate address from real addresses
     if (!usedAddresses[suburb]) usedAddresses[suburb] = 0;
     const suburbAddresses = DEMO_ADDRESSES[suburb] || [];
-    const streetAddress = suburbAddresses[usedAddresses[suburb] % suburbAddresses.length] || `${Math.floor(Math.random() * 100) + 1} Main St`;
+    const fullAddress = suburbAddresses[usedAddresses[suburb] % suburbAddresses.length] || `${Math.floor(Math.random() * 100) + 1} Main Street, ${suburb} QLD 4556`;
     usedAddresses[suburb]++;
-    const fullAddress = `${streetAddress}, ${suburb} QLD 4556`;
     
     // Assign preferred day based on suburb (for clustering)
     const dayMap = {
