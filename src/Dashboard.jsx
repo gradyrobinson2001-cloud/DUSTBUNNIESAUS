@@ -141,6 +141,14 @@ export default function Dashboard() {
   const [showEmailPreview, setShowEmailPreview] = useState(false);
   const [sendingBulkEmail, setSendingBulkEmail] = useState(false);
   
+  // ─── Smart Scheduling State ───
+  const [draggedJob, setDraggedJob] = useState(null); // { job, sourceDate, sourceTeamId, sourceIndex }
+  const [dragOverSlot, setDragOverSlot] = useState(null); // { date, teamId, index }
+  const [routeScores, setRouteScores] = useState({}); // { "date_teamId": { score, suggestion } }
+  const [showOptimisePanel, setShowOptimisePanel] = useState(false);
+  const [optimiseSuggestions, setOptimiseSuggestions] = useState([]);
+  const [suburbSuggestion, setSuburbSuggestion] = useState(null); // shown when adding a job
+
   // Tools/Maps state
   const [distanceFrom, setDistanceFrom] = useState("");
   const [distanceTo, setDistanceTo] = useState("");
@@ -583,6 +591,227 @@ export default function Dashboard() {
     setEditingScheduleClient(null);
     showToast("🗑️ Client deleted");
   };
+
+  // ─── Smart Scheduling Helpers ───
+
+  // Haversine distance between two suburb coords
+  const suburbDistance = (suburbA, suburbB) => {
+    const { SUBURB_COORDS: SC } = { SUBURB_COORDS };
+    const a = SUBURB_COORDS[suburbA] || { lat: -26.659, lng: 153.0997 };
+    const b = SUBURB_COORDS[suburbB] || { lat: -26.659, lng: 153.0997 };
+    const R = 6371;
+    const dLat = (b.lat - a.lat) * Math.PI / 180;
+    const dLon = (b.lng - a.lng) * Math.PI / 180;
+    const aa = Math.sin(dLat / 2) ** 2 +
+      Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa)) * 1.3;
+  };
+
+  // Score a sequence of jobs 0–10 based on total travel distance
+  const scoreJobSequence = (jobs) => {
+    if (jobs.length < 2) return { score: 10, totalKm: 0, suggestion: null };
+    let totalKm = 0;
+    for (let i = 0; i < jobs.length - 1; i++) {
+      const a = scheduleClients.find(c => c.id === jobs[i].clientId);
+      const b = scheduleClients.find(c => c.id === jobs[i + 1].clientId);
+      if (a && b) totalKm += suburbDistance(a.suburb, b.suburb);
+    }
+    // Benchmark: 5 km per leg is great, 20+ km per leg is poor
+    const avgKm = totalKm / (jobs.length - 1);
+    const score = Math.max(1, Math.round(10 - (avgKm / 3)));
+
+    // Find best swap suggestion
+    let bestSaving = 0;
+    let bestSwap = null;
+    for (let i = 0; i < jobs.length - 1; i++) {
+      for (let j = i + 1; j < jobs.length; j++) {
+        const swapped = [...jobs];
+        [swapped[i], swapped[j]] = [swapped[j], swapped[i]];
+        let swappedKm = 0;
+        for (let k = 0; k < swapped.length - 1; k++) {
+          const a = scheduleClients.find(c => c.id === swapped[k].clientId);
+          const b = scheduleClients.find(c => c.id === swapped[k + 1].clientId);
+          if (a && b) swappedKm += suburbDistance(a.suburb, b.suburb);
+        }
+        const saving = totalKm - swappedKm;
+        if (saving > bestSaving && saving > 1.5) {
+          bestSaving = saving;
+          bestSwap = { i, j, saving: saving.toFixed(1), nameA: jobs[i].clientName, nameB: jobs[j].clientName };
+        }
+      }
+    }
+    return {
+      score: Math.min(score, 10),
+      totalKm: totalKm.toFixed(1),
+      suggestion: bestSwap ? `Swap ${bestSwap.nameA} & ${bestSwap.nameB} to save ~${bestSwap.saving} km` : null,
+    };
+  };
+
+  // Recalculate route scores for visible week
+  const recalcRouteScores = useCallback((jobs, dates) => {
+    const scores = {};
+    dates.forEach(date => {
+      scheduleSettings.teams.forEach(team => {
+        const teamJobs = jobs
+          .filter(j => j.date === date && j.teamId === team.id && !j.isBreak)
+          .sort((a, b) => a.startTime.localeCompare(b.startTime));
+        if (teamJobs.length >= 2) {
+          scores[`${date}_${team.id}`] = scoreJobSequence(teamJobs);
+        }
+      });
+    });
+    setRouteScores(scores);
+  }, [scheduleClients, scheduleSettings.teams]);
+
+  // Recompute scores whenever jobs or week changes
+  useEffect(() => {
+    if (page === "calendar") {
+      recalcRouteScores(scheduledJobs, weekDates);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scheduledJobs, calendarWeekStart, page]);
+
+  // Drag handlers
+  const handleDragStart = useCallback((e, job, date, teamId) => {
+    if (job.isBreak) return;
+    setDraggedJob({ job, date, teamId });
+    e.dataTransfer.effectAllowed = "move";
+  }, []);
+
+  const handleDragOver = useCallback((e, date, teamId, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverSlot({ date, teamId, index });
+  }, []);
+
+  const handleDrop = useCallback((e, targetDate, targetTeamId, targetIndex) => {
+    e.preventDefault();
+    if (!draggedJob || draggedJob.job.isBreak) {
+      setDraggedJob(null);
+      setDragOverSlot(null);
+      return;
+    }
+
+    const { job } = draggedJob;
+
+    // Only allow drops within the same day
+    if (targetDate !== draggedJob.date) {
+      showToast("⚠️ Jobs can only be reordered within the same day");
+      setDraggedJob(null);
+      setDragOverSlot(null);
+      return;
+    }
+
+    // Get all jobs for that day/team, excluding the dragged job
+    const teamJobs = scheduledJobs
+      .filter(j => j.date === targetDate && j.teamId === targetTeamId && !j.isBreak)
+      .sort((a, b) => a.startTime.localeCompare(b.startTime))
+      .filter(j => j.id !== job.id);
+
+    // Insert dragged job at target index
+    teamJobs.splice(targetIndex, 0, { ...job, teamId: targetTeamId });
+
+    // Recalculate start times based on new order
+    const settings = scheduleSettings;
+    const timeToMins = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+    const minsToTime = (mins) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+
+    let cursor = timeToMins(settings.workingHours.start);
+    const updatedJobs = teamJobs.map(j => {
+      const start = cursor;
+      const end = start + j.duration;
+      cursor = end + settings.workingHours.travelBuffer;
+      return { ...j, startTime: minsToTime(start), endTime: minsToTime(end) };
+    });
+
+    // Merge back into full jobs list
+    const otherJobs = scheduledJobs.filter(j => !(j.date === targetDate && j.teamId === targetTeamId && !j.isBreak));
+    setScheduledJobs([...otherJobs, ...updatedJobs]);
+    showToast("✅ Schedule reordered");
+    setDraggedJob(null);
+    setDragOverSlot(null);
+  }, [draggedJob, scheduledJobs, scheduleSettings, showToast]);
+
+  const handleDragEnd = useCallback(() => {
+    setDraggedJob(null);
+    setDragOverSlot(null);
+  }, []);
+
+  // Suburb stacking suggestion when adding a new job
+  const getSuburbSuggestion = useCallback((date, suburb) => {
+    if (!date || !suburb) return null;
+    const dayJobs = scheduledJobs.filter(j => j.date === date && !j.isBreak);
+    const suburbCounts = {};
+    dayJobs.forEach(j => {
+      const client = scheduleClients.find(c => c.id === j.clientId);
+      if (client) suburbCounts[client.suburb] = (suburbCounts[client.suburb] || 0) + 1;
+    });
+
+    // Check if there are already clients in same or nearby suburb
+    const sameSuburb = suburbCounts[suburb] || 0;
+    if (sameSuburb > 0) {
+      return { type: "same", message: `💡 ${sameSuburb} job${sameSuburb > 1 ? "s" : ""} already in ${suburb} on this day — great stacking!` };
+    }
+
+    // Check nearby suburbs (within ~5km)
+    const nearby = Object.entries(suburbCounts).filter(([s]) => {
+      const dist = suburbDistance(suburb, s);
+      return dist < 6;
+    });
+    if (nearby.length > 0) {
+      return { type: "nearby", message: `📍 ${nearby[0][0]} is nearby on this day (${(suburbDistance(suburb, nearby[0][0])).toFixed(1)} km away) — efficient routing!` };
+    }
+
+    // Check if a different day has better stacking
+    const allDays = ["monday", "tuesday", "wednesday", "thursday", "friday"];
+    let bestDay = null;
+    let bestCount = 0;
+    allDays.forEach(dayName => {
+      const dayDate = weekDates[["Mon", "Tue", "Wed", "Thu", "Fri"].indexOf(
+        dayName.charAt(0).toUpperCase() + dayName.slice(1, 3)
+      )];
+      if (!dayDate || dayDate === date) return;
+      const count = scheduledJobs.filter(j => {
+        if (j.date !== dayDate || j.isBreak) return false;
+        const c = scheduleClients.find(sc => sc.id === j.clientId);
+        return c && suburbDistance(c.suburb, suburb) < 6;
+      }).length;
+      if (count > bestCount) { bestCount = count; bestDay = dayName; }
+    });
+
+    if (bestDay && bestCount > 0) {
+      return { type: "suggest", message: `💡 ${bestCount} nearby job${bestCount > 1 ? "s" : ""} on ${bestDay.charAt(0).toUpperCase() + bestDay.slice(1)} — consider scheduling there instead` };
+    }
+
+    return null;
+  }, [scheduledJobs, scheduleClients, weekDates]);
+
+  // Week-wide optimise suggestions
+  const generateOptimiseSuggestions = useCallback(() => {
+    const suggestions = [];
+    weekDates.slice(0, 5).forEach((date, dayIndex) => {
+      scheduleSettings.teams.forEach(team => {
+        const teamJobs = scheduledJobs
+          .filter(j => j.date === date && j.teamId === team.id && !j.isBreak)
+          .sort((a, b) => a.startTime.localeCompare(b.startTime));
+        if (teamJobs.length < 2) return;
+        const result = scoreJobSequence(teamJobs);
+        if (result.suggestion) {
+          suggestions.push({
+            day: dayNames[dayIndex],
+            date,
+            team: team.name,
+            teamColor: team.color,
+            suggestion: result.suggestion,
+            saving: result.suggestion,
+            score: result.score,
+          });
+        }
+      });
+    });
+    setOptimiseSuggestions(suggestions);
+    setShowOptimisePanel(true);
+  }, [scheduledJobs, scheduleClients, scheduleSettings.teams, weekDates]);
 
   const weekDates = getWeekDates(calendarWeekStart);
   const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -2198,6 +2427,11 @@ export default function Dashboard() {
                     🚗 Calc Travel
                   </button>
                 )}
+                {scheduledJobs.length > 0 && (
+                  <button onClick={generateOptimiseSuggestions} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid #8B6914`, background: T.accentLight, fontSize: 12, fontWeight: 700, color: "#8B6914", cursor: "pointer" }}>
+                    ✨ Optimise Week
+                  </button>
+                )}
                 <button onClick={() => setShowScheduleSettings(true)} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
                   ⚙️ Settings
                 </button>
@@ -2232,6 +2466,37 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
+
+            {/* Optimise Suggestions Panel */}
+            {showOptimisePanel && (
+              <div style={{ background: T.accentLight, borderRadius: T.radius, padding: "16px 20px", marginBottom: 20, border: `1.5px solid #E8C86A` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: optimiseSuggestions.length > 0 ? 12 : 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 18 }}>✨</span>
+                    <span style={{ fontWeight: 700, fontSize: 14, color: "#8B6914" }}>
+                      {optimiseSuggestions.length > 0 ? `${optimiseSuggestions.length} route improvement${optimiseSuggestions.length > 1 ? "s" : ""} found` : "Schedule looks efficient — no swaps needed! 🎉"}
+                    </span>
+                  </div>
+                  <button onClick={() => setShowOptimisePanel(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "#8B6914" }}>✕</button>
+                </div>
+                {optimiseSuggestions.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {optimiseSuggestions.map((s, i) => (
+                      <div key={i} style={{ background: "#fff", borderRadius: T.radiusSm, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <span style={{ padding: "2px 8px", borderRadius: 6, fontSize: 11, fontWeight: 700, background: s.teamColor + "20", color: s.teamColor }}>
+                          {s.team}
+                        </span>
+                        <span style={{ fontWeight: 700, fontSize: 12, color: T.textMuted }}>{s.day}</span>
+                        <span style={{ fontSize: 13, color: T.text, flex: 1 }}>{s.suggestion}</span>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: s.score >= 7 ? T.primaryDark : s.score >= 4 ? "#8B6914" : T.danger }}>
+                          Score: {s.score}/10
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Week Navigation */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -2281,45 +2546,87 @@ export default function Dashboard() {
                       <div style={{ padding: "12px" }}>
                         {scheduleSettings.teams.map(team => {
                           const teamJobs = getJobsForDateAndTeam(date, team.id);
+                          const routeKey = `${date}_${team.id}`;
+                          const routeScore = routeScores[routeKey];
                           return (
                             <div key={team.id} style={{ marginBottom: 12 }}>
                               <div style={{ fontSize: 11, fontWeight: 700, color: team.color, marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
                                 <div style={{ width: 8, height: 8, borderRadius: 2, background: team.color }} />
                                 {team.name} ({teamJobs.length}/{scheduleSettings.jobsPerTeamPerDay})
+                                {routeScore && (
+                                  <span
+                                    title={routeScore.suggestion || "Route looks good!"}
+                                    style={{
+                                      marginLeft: "auto",
+                                      padding: "1px 6px",
+                                      borderRadius: 8,
+                                      fontSize: 10,
+                                      fontWeight: 800,
+                                      background: routeScore.score >= 7 ? "#D4EDDA" : routeScore.score >= 4 ? T.accentLight : "#FDF0EF",
+                                      color: routeScore.score >= 7 ? "#155724" : routeScore.score >= 4 ? "#8B6914" : T.danger,
+                                      cursor: routeScore.suggestion ? "help" : "default",
+                                    }}
+                                  >
+                                    {routeScore.score}/10
+                                  </span>
+                                )}
                               </div>
                               
                               {teamJobs.length === 0 ? (
-                                <div style={{ padding: "8px 10px", background: T.bg, borderRadius: 6, fontSize: 11, color: T.textLight, textAlign: "center" }}>
+                                <div
+                                  onDragOver={(e) => handleDragOver(e, date, team.id, 0)}
+                                  onDrop={(e) => handleDrop(e, date, team.id, 0)}
+                                  style={{ padding: "8px 10px", background: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id ? T.primaryLight : T.bg, borderRadius: 6, fontSize: 11, color: T.textLight, textAlign: "center", border: `2px dashed ${dragOverSlot?.date === date && dragOverSlot?.teamId === team.id ? T.primary : "transparent"}`, transition: "all 0.15s" }}
+                                >
                                   No jobs
                                 </div>
                               ) : (
                                 <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
                                   {teamJobs.map((job, jobIndex) => {
-                                    // Get travel info to next job
                                     const nextJob = teamJobs[jobIndex + 1];
                                     const travelKey = `${date}_${team.id}`;
                                     const travelData = calendarTravelTimes[travelKey]?.[jobIndex];
-                                    
+                                    const isDragging = draggedJob?.job?.id === job.id;
+                                    const isDropTarget = dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === jobIndex;
+
                                     return (
                                       <React.Fragment key={job.id}>
+                                        {/* Drop zone above job */}
+                                        {draggedJob && !job.isBreak && (
+                                          <div
+                                            onDragOver={(e) => handleDragOver(e, date, team.id, jobIndex)}
+                                            onDrop={(e) => handleDrop(e, date, team.id, jobIndex)}
+                                            style={{ height: isDropTarget ? 32 : 4, background: isDropTarget ? T.primaryLight : "transparent", borderRadius: 4, border: isDropTarget ? `2px dashed ${T.primary}` : "none", transition: "all 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
+                                          >
+                                            {isDropTarget && <span style={{ fontSize: 10, color: T.primaryDark, fontWeight: 700 }}>Drop here</span>}
+                                          </div>
+                                        )}
                                         <div
+                                          draggable={!job.isBreak}
+                                          onDragStart={(e) => handleDragStart(e, job, date, team.id)}
+                                          onDragEnd={handleDragEnd}
                                           onClick={() => !job.isBreak && setEditingJob(job)}
                                           style={{
                                             padding: "8px 10px",
-                                            background: job.isBreak 
-                                              ? T.accentLight 
-                                              : job.status === "completed" 
-                                                ? "#D4EDDA" 
-                                                : `${team.color}15`,
-                                            borderLeft: job.isBreak 
-                                              ? `3px solid ${T.accent}` 
+                                            background: isDragging
+                                              ? "transparent"
+                                              : job.isBreak
+                                              ? T.accentLight
+                                              : job.status === "completed"
+                                              ? "#D4EDDA"
+                                              : `${team.color}15`,
+                                            borderLeft: job.isBreak
+                                              ? `3px solid ${T.accent}`
                                               : `3px solid ${team.color}`,
                                             borderRadius: "0 6px 6px 0",
-                                            cursor: job.isBreak ? "default" : "pointer",
+                                            cursor: job.isBreak ? "default" : "grab",
                                             transition: "all 0.15s",
+                                            opacity: isDragging ? 0.3 : 1,
+                                            border: isDragging ? `2px dashed ${T.border}` : undefined,
                                           }}
                                         >
-                                          <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2 }}>
+                                          <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                                            {!job.isBreak && <span style={{ fontSize: 9, color: T.textLight, cursor: "grab" }}>⠿</span>}
                                             {job.isBreak ? "🍴 Lunch Break" : job.clientName}
                                           </div>
                                           <div style={{ fontSize: 10, color: T.textMuted }}>
@@ -2333,19 +2640,10 @@ export default function Dashboard() {
                                             </div>
                                           )}
                                         </div>
-                                        
-                                        {/* Travel time indicator to next job */}
+
+                                        {/* Travel time indicator */}
                                         {nextJob && (
-                                          <div style={{ 
-                                            padding: "4px 10px 4px 14px", 
-                                            fontSize: 9, 
-                                            color: T.textLight,
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: 4,
-                                            borderLeft: `3px solid ${T.border}`,
-                                            marginLeft: 0,
-                                          }}>
+                                          <div style={{ padding: "4px 10px 4px 14px", fontSize: 9, color: T.textLight, display: "flex", alignItems: "center", gap: 4, borderLeft: `3px solid ${T.border}` }}>
                                             {travelData ? (
                                               <>
                                                 <span>↓</span>
@@ -2364,6 +2662,14 @@ export default function Dashboard() {
                                       </React.Fragment>
                                     );
                                   })}
+                                  {/* Drop zone at bottom of list */}
+                                  {draggedJob && (
+                                    <div
+                                      onDragOver={(e) => handleDragOver(e, date, team.id, teamJobs.length)}
+                                      onDrop={(e) => handleDrop(e, date, team.id, teamJobs.length)}
+                                      style={{ height: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === teamJobs.length ? 32 : 4, background: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === teamJobs.length ? T.primaryLight : "transparent", borderRadius: 4, border: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === teamJobs.length ? `2px dashed ${T.primary}` : "none", transition: "all 0.15s" }}
+                                    />
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -2372,7 +2678,10 @@ export default function Dashboard() {
                         
                         {/* Add Job Button */}
                         <button
-                          onClick={() => setEditingJob({ date, teamId: scheduleSettings.teams[0].id, isNew: true })}
+                          onClick={() => {
+                            setSuburbSuggestion(null);
+                            setEditingJob({ date, teamId: scheduleSettings.teams[0].id, isNew: true });
+                          }}
                           style={{ width: "100%", padding: "6px", borderRadius: 6, border: `1.5px dashed ${T.border}`, background: "transparent", fontSize: 11, color: T.textMuted, cursor: "pointer", marginTop: 4 }}
                         >
                           + Add Job
@@ -3504,6 +3813,57 @@ function EditJobModal({ job, clients, settings, onSave, onDelete, onClose }) {
           </div>
         )}
 
+        {/* Suburb stacking suggestion — only for new jobs with a date + client selected */}
+        {job.isNew && local.date && selectedClient && (() => {
+          // Compute suggestion inline using suburb coords from SUBURB_COORDS
+          const SUBURB_COORDS_LOCAL = {
+            "Twin Waters": { lat: -26.6275, lng: 153.0853 }, "Maroochydore": { lat: -26.6590, lng: 153.0997 },
+            "Kuluin": { lat: -26.6567, lng: 153.0486 }, "Forest Glen": { lat: -26.6833, lng: 153.0167 },
+            "Mons": { lat: -26.7167, lng: 153.0333 }, "Buderim": { lat: -26.6844, lng: 153.0500 },
+            "Alexandra Headland": { lat: -26.6678, lng: 153.1031 }, "Mooloolaba": { lat: -26.6817, lng: 153.1192 },
+            "Mountain Creek": { lat: -26.6933, lng: 153.0972 }, "Minyama": { lat: -26.6833, lng: 153.1167 },
+          };
+          const haversine = (a, b) => {
+            const R = 6371;
+            const dLat = (b.lat - a.lat) * Math.PI / 180;
+            const dLon = (b.lng - a.lng) * Math.PI / 180;
+            const aa = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+            return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1-aa)) * 1.3;
+          };
+          const dayJobs = clients.filter(c => c.status === "active"); // We check via IDs below
+          // Get suburb of selected client
+          const clientSuburb = selectedClient.suburb;
+          const coordA = SUBURB_COORDS_LOCAL[clientSuburb] || { lat: -26.659, lng: 153.0997 };
+          // Check sameday same suburb in external jobs (not available here, skip)
+          // Show a simple area match tip based on the areaSchedule
+          const areaSchedule = settings.areaSchedule;
+          let matchedDay = null;
+          for (const [day, suburbs] of Object.entries(areaSchedule)) {
+            if (suburbs.some(s => s.toLowerCase() === clientSuburb.toLowerCase())) {
+              matchedDay = day;
+              break;
+            }
+          }
+          const selectedDateDay = new Date(local.date).toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
+          if (matchedDay && matchedDay !== selectedDateDay) {
+            return (
+              <div style={{ background: "#FFF8E7", borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.accent}`, fontSize: 12 }}>
+                <span style={{ fontWeight: 700, color: "#8B6914" }}>💡 Suburb suggestion: </span>
+                <span style={{ color: "#8B6914" }}>{clientSuburb} is usually scheduled on <strong>{matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s</strong> — moving this job there would improve route efficiency.</span>
+              </div>
+            );
+          }
+          if (matchedDay && matchedDay === selectedDateDay) {
+            return (
+              <div style={{ background: T.primaryLight, borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.primary}`, fontSize: 12 }}>
+                <span style={{ fontWeight: 700, color: T.primaryDark }}>✅ Great stacking! </span>
+                <span style={{ color: T.primaryDark }}>{clientSuburb} is already scheduled on {matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s — this job fits perfectly.</span>
+              </div>
+            );
+          }
+          return null;
+        })()}
+
         <div style={{ display: "flex", gap: 10 }}>
           {onDelete && (
             <button onClick={onDelete} style={{ padding: "12px 18px", borderRadius: T.radiusSm, border: "none", background: "#FDF0EF", color: T.danger, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
@@ -3634,6 +3994,36 @@ function EditScheduleClientModal({ client, settings, onSave, onDelete, onClose }
             </select>
           </div>
         </div>
+
+        {/* Suburb stacking suggestion */}
+        {isNew && local.suburb && (() => {
+          const areaSchedule = settings.areaSchedule;
+          let matchedDay = null;
+          for (const [day, suburbs] of Object.entries(areaSchedule)) {
+            if (suburbs.some(s => s.toLowerCase() === local.suburb.toLowerCase())) {
+              matchedDay = day;
+              break;
+            }
+          }
+          const selectedDay = local.preferredDay;
+          if (matchedDay && matchedDay !== selectedDay) {
+            return (
+              <div style={{ background: "#FFF8E7", borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.accent}`, fontSize: 12 }}>
+                <span style={{ fontWeight: 700, color: "#8B6914" }}>💡 Suburb tip: </span>
+                <span style={{ color: "#8B6914" }}>{local.suburb} is grouped on <strong>{matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s</strong> for efficient routing. Consider setting Preferred Day to match.</span>
+              </div>
+            );
+          }
+          if (matchedDay && matchedDay === selectedDay) {
+            return (
+              <div style={{ background: T.primaryLight, borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.primary}`, fontSize: 12 }}>
+                <span style={{ fontWeight: 700, color: T.primaryDark }}>✅ Perfect fit! </span>
+                <span style={{ color: T.primaryDark }}>{local.suburb} is already clustered on {matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s — this client will stack well with the existing route.</span>
+              </div>
+            );
+          }
+          return null;
+        })()}
 
         {/* Duration */}
         <div style={{ background: T.bg, borderRadius: T.radiusSm, padding: "14px 16px" }}>
