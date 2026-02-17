@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS, loadEmailHistory, saveEmailHistory, addEmailToHistory, getLastEmailForClient, daysSince, getFollowUpStatus, EMAIL_TEMPLATES, CUSTOM_EMAIL_STYLES, SUBURB_COORDS, getClientCoords } from "./shared";
+import { T, SERVICED_AREAS, loadPricing, savePricing, loadTemplates, saveTemplates, loadClients, saveClients, calcQuote, ICON_OPTIONS, loadScheduleSettings, saveScheduleSettings, loadScheduledJobs, saveScheduledJobs, loadScheduleClients, saveScheduleClients, calculateDuration, generateDemoClients, generateScheduleForClients, wipeDemoData, DEFAULT_SCHEDULE_SETTINGS, loadEmailHistory, saveEmailHistory, addEmailToHistory, getLastEmailForClient, daysSince, getFollowUpStatus, EMAIL_TEMPLATES, CUSTOM_EMAIL_STYLES, SUBURB_COORDS, getClientCoords, loadPayments, savePayments, addPayment, loadInvoices, saveInvoices, addInvoice, savePhoto, getPhotosForJob, getPhotosForDate, getAllPhotos, CLEANER_PIN } from "./shared";
 import emailjs from '@emailjs/browser';
 
 // ─── EmailJS Config ───
@@ -141,14 +141,6 @@ export default function Dashboard() {
   const [showEmailPreview, setShowEmailPreview] = useState(false);
   const [sendingBulkEmail, setSendingBulkEmail] = useState(false);
   
-  // ─── Smart Scheduling State ───
-  const [draggedJob, setDraggedJob] = useState(null); // { job, sourceDate, sourceTeamId, sourceIndex }
-  const [dragOverSlot, setDragOverSlot] = useState(null); // { date, teamId, index }
-  const [routeScores, setRouteScores] = useState({}); // { "date_teamId": { score, suggestion } }
-  const [showOptimisePanel, setShowOptimisePanel] = useState(false);
-  const [optimiseSuggestions, setOptimiseSuggestions] = useState([]);
-  const [suburbSuggestion, setSuburbSuggestion] = useState(null); // shown when adding a job
-
   // Tools/Maps state
   const [distanceFrom, setDistanceFrom] = useState("");
   const [distanceTo, setDistanceTo] = useState("");
@@ -160,6 +152,22 @@ export default function Dashboard() {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const [calendarTravelTimes, setCalendarTravelTimes] = useState({}); // { "date_teamId": [{ from, to, distance, duration }] }
+  
+  // Payments & Invoices state
+  const [payments, setPayments] = useState(loadPayments);
+  const [invoices, setInvoices] = useState(loadInvoices);
+  const [showInvoiceModal, setShowInvoiceModal] = useState(null); // job to invoice
+  const [paymentFilter, setPaymentFilter] = useState("unpaid");
+  
+  // Photos state
+  const [photos, setPhotos] = useState([]);
+  const [photoViewDate, setPhotoViewDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [selectedPhoto, setSelectedPhoto] = useState(null);
+  
+  // Load photos on mount
+  useEffect(() => {
+    getAllPhotos().then(setPhotos).catch(console.error);
+  }, []);
   
   const [filter, setFilter] = useState("active");
   const [searchTerm, setSearchTerm] = useState("");
@@ -306,6 +314,14 @@ export default function Dashboard() {
   useEffect(() => {
     saveEmailHistory(emailHistory);
   }, [emailHistory]);
+
+  useEffect(() => {
+    savePayments(payments);
+  }, [payments]);
+
+  useEffect(() => {
+    saveInvoices(invoices);
+  }, [invoices]);
 
   // ─── Actions ───
   const sendInfoForm = (enqId) => {
@@ -591,227 +607,6 @@ export default function Dashboard() {
     setEditingScheduleClient(null);
     showToast("🗑️ Client deleted");
   };
-
-  // ─── Smart Scheduling Helpers ───
-
-  // Haversine distance between two suburb coords
-  const suburbDistance = (suburbA, suburbB) => {
-    const { SUBURB_COORDS: SC } = { SUBURB_COORDS };
-    const a = SUBURB_COORDS[suburbA] || { lat: -26.659, lng: 153.0997 };
-    const b = SUBURB_COORDS[suburbB] || { lat: -26.659, lng: 153.0997 };
-    const R = 6371;
-    const dLat = (b.lat - a.lat) * Math.PI / 180;
-    const dLon = (b.lng - a.lng) * Math.PI / 180;
-    const aa = Math.sin(dLat / 2) ** 2 +
-      Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa)) * 1.3;
-  };
-
-  // Score a sequence of jobs 0–10 based on total travel distance
-  const scoreJobSequence = (jobs) => {
-    if (jobs.length < 2) return { score: 10, totalKm: 0, suggestion: null };
-    let totalKm = 0;
-    for (let i = 0; i < jobs.length - 1; i++) {
-      const a = scheduleClients.find(c => c.id === jobs[i].clientId);
-      const b = scheduleClients.find(c => c.id === jobs[i + 1].clientId);
-      if (a && b) totalKm += suburbDistance(a.suburb, b.suburb);
-    }
-    // Benchmark: 5 km per leg is great, 20+ km per leg is poor
-    const avgKm = totalKm / (jobs.length - 1);
-    const score = Math.max(1, Math.round(10 - (avgKm / 3)));
-
-    // Find best swap suggestion
-    let bestSaving = 0;
-    let bestSwap = null;
-    for (let i = 0; i < jobs.length - 1; i++) {
-      for (let j = i + 1; j < jobs.length; j++) {
-        const swapped = [...jobs];
-        [swapped[i], swapped[j]] = [swapped[j], swapped[i]];
-        let swappedKm = 0;
-        for (let k = 0; k < swapped.length - 1; k++) {
-          const a = scheduleClients.find(c => c.id === swapped[k].clientId);
-          const b = scheduleClients.find(c => c.id === swapped[k + 1].clientId);
-          if (a && b) swappedKm += suburbDistance(a.suburb, b.suburb);
-        }
-        const saving = totalKm - swappedKm;
-        if (saving > bestSaving && saving > 1.5) {
-          bestSaving = saving;
-          bestSwap = { i, j, saving: saving.toFixed(1), nameA: jobs[i].clientName, nameB: jobs[j].clientName };
-        }
-      }
-    }
-    return {
-      score: Math.min(score, 10),
-      totalKm: totalKm.toFixed(1),
-      suggestion: bestSwap ? `Swap ${bestSwap.nameA} & ${bestSwap.nameB} to save ~${bestSwap.saving} km` : null,
-    };
-  };
-
-  // Recalculate route scores for visible week
-  const recalcRouteScores = useCallback((jobs, dates) => {
-    const scores = {};
-    dates.forEach(date => {
-      scheduleSettings.teams.forEach(team => {
-        const teamJobs = jobs
-          .filter(j => j.date === date && j.teamId === team.id && !j.isBreak)
-          .sort((a, b) => a.startTime.localeCompare(b.startTime));
-        if (teamJobs.length >= 2) {
-          scores[`${date}_${team.id}`] = scoreJobSequence(teamJobs);
-        }
-      });
-    });
-    setRouteScores(scores);
-  }, [scheduleClients, scheduleSettings.teams]);
-
-  // Recompute scores whenever jobs or week changes
-  useEffect(() => {
-    if (page === "calendar") {
-      recalcRouteScores(scheduledJobs, weekDates);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scheduledJobs, calendarWeekStart, page]);
-
-  // Drag handlers
-  const handleDragStart = useCallback((e, job, date, teamId) => {
-    if (job.isBreak) return;
-    setDraggedJob({ job, date, teamId });
-    e.dataTransfer.effectAllowed = "move";
-  }, []);
-
-  const handleDragOver = useCallback((e, date, teamId, index) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    setDragOverSlot({ date, teamId, index });
-  }, []);
-
-  const handleDrop = useCallback((e, targetDate, targetTeamId, targetIndex) => {
-    e.preventDefault();
-    if (!draggedJob || draggedJob.job.isBreak) {
-      setDraggedJob(null);
-      setDragOverSlot(null);
-      return;
-    }
-
-    const { job } = draggedJob;
-
-    // Only allow drops within the same day
-    if (targetDate !== draggedJob.date) {
-      showToast("⚠️ Jobs can only be reordered within the same day");
-      setDraggedJob(null);
-      setDragOverSlot(null);
-      return;
-    }
-
-    // Get all jobs for that day/team, excluding the dragged job
-    const teamJobs = scheduledJobs
-      .filter(j => j.date === targetDate && j.teamId === targetTeamId && !j.isBreak)
-      .sort((a, b) => a.startTime.localeCompare(b.startTime))
-      .filter(j => j.id !== job.id);
-
-    // Insert dragged job at target index
-    teamJobs.splice(targetIndex, 0, { ...job, teamId: targetTeamId });
-
-    // Recalculate start times based on new order
-    const settings = scheduleSettings;
-    const timeToMins = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
-    const minsToTime = (mins) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
-
-    let cursor = timeToMins(settings.workingHours.start);
-    const updatedJobs = teamJobs.map(j => {
-      const start = cursor;
-      const end = start + j.duration;
-      cursor = end + settings.workingHours.travelBuffer;
-      return { ...j, startTime: minsToTime(start), endTime: minsToTime(end) };
-    });
-
-    // Merge back into full jobs list
-    const otherJobs = scheduledJobs.filter(j => !(j.date === targetDate && j.teamId === targetTeamId && !j.isBreak));
-    setScheduledJobs([...otherJobs, ...updatedJobs]);
-    showToast("✅ Schedule reordered");
-    setDraggedJob(null);
-    setDragOverSlot(null);
-  }, [draggedJob, scheduledJobs, scheduleSettings, showToast]);
-
-  const handleDragEnd = useCallback(() => {
-    setDraggedJob(null);
-    setDragOverSlot(null);
-  }, []);
-
-  // Suburb stacking suggestion when adding a new job
-  const getSuburbSuggestion = useCallback((date, suburb) => {
-    if (!date || !suburb) return null;
-    const dayJobs = scheduledJobs.filter(j => j.date === date && !j.isBreak);
-    const suburbCounts = {};
-    dayJobs.forEach(j => {
-      const client = scheduleClients.find(c => c.id === j.clientId);
-      if (client) suburbCounts[client.suburb] = (suburbCounts[client.suburb] || 0) + 1;
-    });
-
-    // Check if there are already clients in same or nearby suburb
-    const sameSuburb = suburbCounts[suburb] || 0;
-    if (sameSuburb > 0) {
-      return { type: "same", message: `💡 ${sameSuburb} job${sameSuburb > 1 ? "s" : ""} already in ${suburb} on this day — great stacking!` };
-    }
-
-    // Check nearby suburbs (within ~5km)
-    const nearby = Object.entries(suburbCounts).filter(([s]) => {
-      const dist = suburbDistance(suburb, s);
-      return dist < 6;
-    });
-    if (nearby.length > 0) {
-      return { type: "nearby", message: `📍 ${nearby[0][0]} is nearby on this day (${(suburbDistance(suburb, nearby[0][0])).toFixed(1)} km away) — efficient routing!` };
-    }
-
-    // Check if a different day has better stacking
-    const allDays = ["monday", "tuesday", "wednesday", "thursday", "friday"];
-    let bestDay = null;
-    let bestCount = 0;
-    allDays.forEach(dayName => {
-      const dayDate = weekDates[["Mon", "Tue", "Wed", "Thu", "Fri"].indexOf(
-        dayName.charAt(0).toUpperCase() + dayName.slice(1, 3)
-      )];
-      if (!dayDate || dayDate === date) return;
-      const count = scheduledJobs.filter(j => {
-        if (j.date !== dayDate || j.isBreak) return false;
-        const c = scheduleClients.find(sc => sc.id === j.clientId);
-        return c && suburbDistance(c.suburb, suburb) < 6;
-      }).length;
-      if (count > bestCount) { bestCount = count; bestDay = dayName; }
-    });
-
-    if (bestDay && bestCount > 0) {
-      return { type: "suggest", message: `💡 ${bestCount} nearby job${bestCount > 1 ? "s" : ""} on ${bestDay.charAt(0).toUpperCase() + bestDay.slice(1)} — consider scheduling there instead` };
-    }
-
-    return null;
-  }, [scheduledJobs, scheduleClients, weekDates]);
-
-  // Week-wide optimise suggestions
-  const generateOptimiseSuggestions = useCallback(() => {
-    const suggestions = [];
-    weekDates.slice(0, 5).forEach((date, dayIndex) => {
-      scheduleSettings.teams.forEach(team => {
-        const teamJobs = scheduledJobs
-          .filter(j => j.date === date && j.teamId === team.id && !j.isBreak)
-          .sort((a, b) => a.startTime.localeCompare(b.startTime));
-        if (teamJobs.length < 2) return;
-        const result = scoreJobSequence(teamJobs);
-        if (result.suggestion) {
-          suggestions.push({
-            day: dayNames[dayIndex],
-            date,
-            team: team.name,
-            teamColor: team.color,
-            suggestion: result.suggestion,
-            saving: result.suggestion,
-            score: result.score,
-          });
-        }
-      });
-    });
-    setOptimiseSuggestions(suggestions);
-    setShowOptimisePanel(true);
-  }, [scheduledJobs, scheduleClients, scheduleSettings.teams, weekDates]);
 
   const weekDates = getWeekDates(calendarWeekStart);
   const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -1426,10 +1221,15 @@ export default function Dashboard() {
     return days >= 3;
   });
 
+  // Calculate unpaid jobs count
+  const unpaidJobsCount = scheduledJobs.filter(j => j.status === "completed" && j.paymentStatus !== "paid").length;
+
   const navItems = [
     { id: "inbox", label: "Inbox", icon: "📥", badge: enquiries.filter(e => !e.archived && ["new", "info_received", "quote_ready"].includes(e.status)).length },
     { id: "quotes", label: "Quotes", icon: "💰", badge: pendingQuotes.length },
     { id: "calendar", label: "Calendar", icon: "📅", badge: 0 },
+    { id: "payments", label: "Payments", icon: "💳", badge: unpaidJobsCount },
+    { id: "photos", label: "Photos", icon: "📸", badge: 0 },
     { id: "emails", label: "Email Center", icon: "📧", badge: quotesNeedingFollowUp.length },
     { id: "tools", label: "Tools", icon: "🗺️", badge: 0 },
     { id: "clients", label: "Clients", icon: "👥", badge: clients.length },
@@ -2113,6 +1913,396 @@ export default function Dashboard() {
           </>
         )}
 
+        {/* ─── PAYMENTS PAGE ─── */}
+        {page === "payments" && (
+          <>
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", gap: 12, marginBottom: 20 }}>
+              <div>
+                <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 24, fontWeight: 900, color: T.text }}>Payments</h1>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textMuted }}>
+                  Track payments & generate invoices
+                </p>
+              </div>
+            </div>
+
+            {/* Payment Summary Cards */}
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4, 1fr)", gap: 16, marginBottom: 24 }}>
+              {(() => {
+                const completedJobs = scheduledJobs.filter(j => j.status === "completed");
+                const unpaidJobs = completedJobs.filter(j => j.paymentStatus !== "paid");
+                const paidJobs = completedJobs.filter(j => j.paymentStatus === "paid");
+                const totalEarned = paidJobs.reduce((sum, j) => sum + (j.price || 0), 0);
+                const totalOwed = unpaidJobs.reduce((sum, j) => sum + (j.price || 0), 0);
+                
+                return (
+                  <>
+                    <div style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow }}>
+                      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Total Earned</div>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: T.primary }}>${totalEarned.toFixed(0)}</div>
+                      <div style={{ fontSize: 11, color: T.textLight }}>{paidJobs.length} paid jobs</div>
+                    </div>
+                    <div style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow }}>
+                      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Outstanding</div>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: totalOwed > 0 ? T.danger : T.text }}>${totalOwed.toFixed(0)}</div>
+                      <div style={{ fontSize: 11, color: T.textLight }}>{unpaidJobs.length} unpaid jobs</div>
+                    </div>
+                    <div style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow }}>
+                      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>Invoices Sent</div>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: T.blue }}>{invoices.length}</div>
+                      <div style={{ fontSize: 11, color: T.textLight }}>{invoices.filter(i => i.status === "paid").length} paid</div>
+                    </div>
+                    <div style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow }}>
+                      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 4 }}>This Month</div>
+                      <div style={{ fontSize: 28, fontWeight: 900, color: T.text }}>
+                        ${paidJobs.filter(j => {
+                          const jobDate = new Date(j.date);
+                          const now = new Date();
+                          return jobDate.getMonth() === now.getMonth() && jobDate.getFullYear() === now.getFullYear();
+                        }).reduce((sum, j) => sum + (j.price || 0), 0).toFixed(0)}
+                      </div>
+                      <div style={{ fontSize: 11, color: T.textLight }}>collected</div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+
+            {/* Filter Tabs */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+              {[
+                { id: "unpaid", label: "Unpaid" },
+                { id: "paid", label: "Paid" },
+                { id: "all", label: "All Jobs" },
+                { id: "invoices", label: "Invoices" },
+              ].map(f => (
+                <button
+                  key={f.id}
+                  onClick={() => setPaymentFilter(f.id)}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: 20,
+                    border: paymentFilter === f.id ? `2px solid ${T.primary}` : `1.5px solid ${T.border}`,
+                    background: paymentFilter === f.id ? T.primaryLight : "#fff",
+                    color: paymentFilter === f.id ? T.primaryDark : T.textMuted,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Jobs List or Invoices List */}
+            {paymentFilter === "invoices" ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {invoices.length === 0 ? (
+                  <div style={{ background: "#fff", borderRadius: T.radius, padding: 40, textAlign: "center", color: T.textLight }}>
+                    <div style={{ fontSize: 32, marginBottom: 8 }}>🧾</div>
+                    <p>No invoices yet</p>
+                  </div>
+                ) : (
+                  invoices.map(inv => (
+                    <div key={inv.id} style={{ background: "#fff", borderRadius: T.radius, padding: "16px 20px", boxShadow: T.shadow, display: "flex", alignItems: "center", gap: 16 }}>
+                      <div style={{ width: 44, height: 44, borderRadius: T.radiusSm, background: inv.status === "paid" ? T.primaryLight : T.accentLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>
+                        🧾
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{inv.invoiceNumber}</div>
+                        <div style={{ fontSize: 12, color: T.textMuted }}>{inv.clientName} · {new Date(inv.createdAt).toLocaleDateString()}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: T.text }}>${inv.amount?.toFixed(2)}</div>
+                        <span style={{ padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, background: inv.status === "paid" ? T.primaryLight : T.accentLight, color: inv.status === "paid" ? T.primaryDark : "#8B6914" }}>
+                          {inv.status === "paid" ? "Paid" : "Unpaid"}
+                        </span>
+                      </div>
+                      {inv.status !== "paid" && (
+                        <button
+                          onClick={() => {
+                            setInvoices(prev => prev.map(i => i.id === inv.id ? { ...i, status: "paid", paidAt: new Date().toISOString() } : i));
+                            showToast("✅ Invoice marked as paid");
+                          }}
+                          style={{ padding: "8px 12px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Mark Paid
+                        </button>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {(() => {
+                  const completedJobs = scheduledJobs.filter(j => j.status === "completed");
+                  const filteredJobs = paymentFilter === "unpaid" 
+                    ? completedJobs.filter(j => j.paymentStatus !== "paid")
+                    : paymentFilter === "paid"
+                    ? completedJobs.filter(j => j.paymentStatus === "paid")
+                    : completedJobs;
+                  
+                  if (filteredJobs.length === 0) {
+                    return (
+                      <div style={{ background: "#fff", borderRadius: T.radius, padding: 40, textAlign: "center", color: T.textLight }}>
+                        <div style={{ fontSize: 32, marginBottom: 8 }}>💳</div>
+                        <p>No {paymentFilter} jobs</p>
+                      </div>
+                    );
+                  }
+                  
+                  return filteredJobs.sort((a, b) => b.date.localeCompare(a.date)).map(job => {
+                    const client = scheduleClients.find(c => c.id === job.clientId);
+                    const isPaid = job.paymentStatus === "paid";
+                    
+                    return (
+                      <div key={job.id} style={{ background: "#fff", borderRadius: T.radius, padding: "16px 20px", boxShadow: T.shadow, borderLeft: `4px solid ${isPaid ? T.primary : T.accent}` }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                              <span style={{ fontWeight: 700, fontSize: 14, color: T.text }}>{job.clientName}</span>
+                              <span style={{ padding: "2px 8px", borderRadius: 10, fontSize: 10, fontWeight: 700, background: isPaid ? T.primaryLight : T.accentLight, color: isPaid ? T.primaryDark : "#8B6914" }}>
+                                {isPaid ? "Paid" : "Unpaid"}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: 12, color: T.textMuted }}>
+                              📅 {new Date(job.date).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" })}
+                              <span style={{ margin: "0 8px" }}>·</span>
+                              📍 {job.suburb}
+                              <span style={{ margin: "0 8px" }}>·</span>
+                              ⏱️ {job.duration} mins
+                            </div>
+                            {client?.email && (
+                              <div style={{ fontSize: 11, color: T.textLight, marginTop: 4 }}>📧 {client.email}</div>
+                            )}
+                          </div>
+                          <div style={{ textAlign: "right", marginRight: 16 }}>
+                            <div style={{ fontWeight: 700, fontSize: 20, color: T.text }}>${job.price?.toFixed(2) || "—"}</div>
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            {!isPaid && (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    setScheduledJobs(prev => prev.map(j => j.id === job.id ? { ...j, paymentStatus: "paid", paidAt: new Date().toISOString() } : j));
+                                    showToast("✅ Marked as paid");
+                                  }}
+                                  style={{ padding: "8px 12px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+                                >
+                                  💳 Mark Paid
+                                </button>
+                                <button
+                                  onClick={() => setShowInvoiceModal(job)}
+                                  style={{ padding: "8px 12px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", color: T.textMuted, fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+                                >
+                                  🧾 Invoice
+                                </button>
+                              </>
+                            )}
+                            {isPaid && (
+                              <button
+                                onClick={() => {
+                                  setScheduledJobs(prev => prev.map(j => j.id === job.id ? { ...j, paymentStatus: "unpaid", paidAt: null } : j));
+                                  showToast("Marked as unpaid");
+                                }}
+                                style={{ padding: "8px 12px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", color: T.textMuted, fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+                              >
+                                Undo
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ─── PHOTOS PAGE ─── */}
+        {page === "photos" && (
+          <>
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", gap: 12, marginBottom: 20 }}>
+              <div>
+                <h1 style={{ margin: 0, fontSize: isMobile ? 22 : 24, fontWeight: 900, color: T.text }}>Job Photos</h1>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textMuted }}>
+                  Before & after photos from your cleaning teams
+                </p>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <input
+                  type="date"
+                  value={photoViewDate}
+                  onChange={e => setPhotoViewDate(e.target.value)}
+                  style={{ padding: "10px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+                />
+                <button
+                  onClick={() => getAllPhotos().then(setPhotos)}
+                  style={{ padding: "10px 16px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}
+                >
+                  🔄 Refresh
+                </button>
+              </div>
+            </div>
+
+            {/* Cleaner Portal Link */}
+            <div style={{ background: T.blueLight, borderRadius: T.radius, padding: "16px 20px", marginBottom: 24, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 24 }}>📱</span>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: T.blue }}>Cleaner Portal</div>
+                  <div style={{ fontSize: 12, color: T.textMuted }}>Share this link with your cleaners to upload photos</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <code style={{ padding: "8px 12px", background: "#fff", borderRadius: 6, fontSize: 12, color: T.text }}>
+                  {typeof window !== "undefined" ? window.location.origin : ""}/cleaner
+                </code>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}/cleaner`);
+                    showToast("📋 Link copied!");
+                  }}
+                  style={{ padding: "8px 12px", borderRadius: T.radiusSm, border: "none", background: T.blue, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            {/* Photos Grid */}
+            {(() => {
+              const datePhotos = photos.filter(p => p.date === photoViewDate);
+              const jobsWithPhotos = [...new Set(datePhotos.map(p => p.jobId))];
+              
+              if (datePhotos.length === 0) {
+                return (
+                  <div style={{ background: "#fff", borderRadius: T.radius, padding: 60, textAlign: "center", color: T.textLight }}>
+                    <div style={{ fontSize: 48, marginBottom: 16 }}>📸</div>
+                    <p style={{ margin: "0 0 8px", fontWeight: 700, fontSize: 16 }}>No photos for this date</p>
+                    <p style={{ margin: 0, fontSize: 13 }}>Photos uploaded by cleaners will appear here</p>
+                  </div>
+                );
+              }
+              
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                  {jobsWithPhotos.map(jobId => {
+                    const job = scheduledJobs.find(j => j.id === jobId);
+                    const jobPhotos = datePhotos.filter(p => p.jobId === jobId);
+                    const beforePhoto = jobPhotos.find(p => p.type === "before");
+                    const afterPhoto = jobPhotos.find(p => p.type === "after");
+                    const team = scheduleSettings.teams.find(t => t.id === job?.teamId);
+                    
+                    return (
+                      <div key={jobId} style={{ background: "#fff", borderRadius: T.radius, padding: "20px", boxShadow: T.shadow }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                            <div style={{ width: 10, height: 10, borderRadius: "50%", background: team?.color || T.primary }} />
+                            <div>
+                              <div style={{ fontWeight: 700, fontSize: 15, color: T.text }}>{job?.clientName || "Unknown Job"}</div>
+                              <div style={{ fontSize: 12, color: T.textMuted }}>{job?.suburb} · {team?.name}</div>
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 12, color: T.textLight }}>
+                            {job?.startTime} - {job?.endTime}
+                          </div>
+                        </div>
+                        
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                          {/* Before Photo */}
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, marginBottom: 8, textTransform: "uppercase" }}>Before</div>
+                            {beforePhoto ? (
+                              <div
+                                onClick={() => setSelectedPhoto(beforePhoto)}
+                                style={{ cursor: "pointer", borderRadius: T.radiusSm, overflow: "hidden", aspectRatio: "4/3", background: T.bg }}
+                              >
+                                <img src={beforePhoto.data} alt="Before" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                              </div>
+                            ) : (
+                              <div style={{ aspectRatio: "4/3", background: T.bg, borderRadius: T.radiusSm, display: "flex", alignItems: "center", justifyContent: "center", color: T.textLight }}>
+                                No photo
+                              </div>
+                            )}
+                          </div>
+                          
+                          {/* After Photo */}
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, marginBottom: 8, textTransform: "uppercase" }}>After</div>
+                            {afterPhoto ? (
+                              <div
+                                onClick={() => setSelectedPhoto(afterPhoto)}
+                                style={{ cursor: "pointer", borderRadius: T.radiusSm, overflow: "hidden", aspectRatio: "4/3", background: T.bg }}
+                              >
+                                <img src={afterPhoto.data} alt="After" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                              </div>
+                            ) : (
+                              <div style={{ aspectRatio: "4/3", background: T.bg, borderRadius: T.radiusSm, display: "flex", alignItems: "center", justifyContent: "center", color: T.textLight }}>
+                                No photo
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        
+                        <div style={{ marginTop: 12, fontSize: 11, color: T.textLight }}>
+                          Uploaded: {jobPhotos[0] && new Date(jobPhotos[0].uploadedAt).toLocaleTimeString()}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* Photo Lightbox Modal */}
+            {selectedPhoto && (
+              <div
+                onClick={() => setSelectedPhoto(null)}
+                style={{
+                  position: "fixed",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: "rgba(0,0,0,0.9)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  zIndex: 1000,
+                  padding: 20,
+                }}
+              >
+                <img
+                  src={selectedPhoto.data}
+                  alt={selectedPhoto.type}
+                  style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: T.radius }}
+                />
+                <button
+                  onClick={() => setSelectedPhoto(null)}
+                  style={{
+                    position: "absolute",
+                    top: 20,
+                    right: 20,
+                    width: 44,
+                    height: 44,
+                    borderRadius: "50%",
+                    border: "none",
+                    background: "#fff",
+                    fontSize: 20,
+                    cursor: "pointer",
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </>
+        )}
+
         {/* ─── TOOLS PAGE ─── */}
         {page === "tools" && (
           <>
@@ -2427,11 +2617,6 @@ export default function Dashboard() {
                     🚗 Calc Travel
                   </button>
                 )}
-                {scheduledJobs.length > 0 && (
-                  <button onClick={generateOptimiseSuggestions} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid #8B6914`, background: T.accentLight, fontSize: 12, fontWeight: 700, color: "#8B6914", cursor: "pointer" }}>
-                    ✨ Optimise Week
-                  </button>
-                )}
                 <button onClick={() => setShowScheduleSettings(true)} style={{ padding: "8px 14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", fontSize: 12, fontWeight: 700, color: T.textMuted, cursor: "pointer" }}>
                   ⚙️ Settings
                 </button>
@@ -2466,37 +2651,6 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
-
-            {/* Optimise Suggestions Panel */}
-            {showOptimisePanel && (
-              <div style={{ background: T.accentLight, borderRadius: T.radius, padding: "16px 20px", marginBottom: 20, border: `1.5px solid #E8C86A` }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: optimiseSuggestions.length > 0 ? 12 : 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 18 }}>✨</span>
-                    <span style={{ fontWeight: 700, fontSize: 14, color: "#8B6914" }}>
-                      {optimiseSuggestions.length > 0 ? `${optimiseSuggestions.length} route improvement${optimiseSuggestions.length > 1 ? "s" : ""} found` : "Schedule looks efficient — no swaps needed! 🎉"}
-                    </span>
-                  </div>
-                  <button onClick={() => setShowOptimisePanel(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "#8B6914" }}>✕</button>
-                </div>
-                {optimiseSuggestions.length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {optimiseSuggestions.map((s, i) => (
-                      <div key={i} style={{ background: "#fff", borderRadius: T.radiusSm, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                        <span style={{ padding: "2px 8px", borderRadius: 6, fontSize: 11, fontWeight: 700, background: s.teamColor + "20", color: s.teamColor }}>
-                          {s.team}
-                        </span>
-                        <span style={{ fontWeight: 700, fontSize: 12, color: T.textMuted }}>{s.day}</span>
-                        <span style={{ fontSize: 13, color: T.text, flex: 1 }}>{s.suggestion}</span>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: s.score >= 7 ? T.primaryDark : s.score >= 4 ? "#8B6914" : T.danger }}>
-                          Score: {s.score}/10
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
 
             {/* Week Navigation */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -2546,87 +2700,45 @@ export default function Dashboard() {
                       <div style={{ padding: "12px" }}>
                         {scheduleSettings.teams.map(team => {
                           const teamJobs = getJobsForDateAndTeam(date, team.id);
-                          const routeKey = `${date}_${team.id}`;
-                          const routeScore = routeScores[routeKey];
                           return (
                             <div key={team.id} style={{ marginBottom: 12 }}>
                               <div style={{ fontSize: 11, fontWeight: 700, color: team.color, marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
                                 <div style={{ width: 8, height: 8, borderRadius: 2, background: team.color }} />
                                 {team.name} ({teamJobs.length}/{scheduleSettings.jobsPerTeamPerDay})
-                                {routeScore && (
-                                  <span
-                                    title={routeScore.suggestion || "Route looks good!"}
-                                    style={{
-                                      marginLeft: "auto",
-                                      padding: "1px 6px",
-                                      borderRadius: 8,
-                                      fontSize: 10,
-                                      fontWeight: 800,
-                                      background: routeScore.score >= 7 ? "#D4EDDA" : routeScore.score >= 4 ? T.accentLight : "#FDF0EF",
-                                      color: routeScore.score >= 7 ? "#155724" : routeScore.score >= 4 ? "#8B6914" : T.danger,
-                                      cursor: routeScore.suggestion ? "help" : "default",
-                                    }}
-                                  >
-                                    {routeScore.score}/10
-                                  </span>
-                                )}
                               </div>
                               
                               {teamJobs.length === 0 ? (
-                                <div
-                                  onDragOver={(e) => handleDragOver(e, date, team.id, 0)}
-                                  onDrop={(e) => handleDrop(e, date, team.id, 0)}
-                                  style={{ padding: "8px 10px", background: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id ? T.primaryLight : T.bg, borderRadius: 6, fontSize: 11, color: T.textLight, textAlign: "center", border: `2px dashed ${dragOverSlot?.date === date && dragOverSlot?.teamId === team.id ? T.primary : "transparent"}`, transition: "all 0.15s" }}
-                                >
+                                <div style={{ padding: "8px 10px", background: T.bg, borderRadius: 6, fontSize: 11, color: T.textLight, textAlign: "center" }}>
                                   No jobs
                                 </div>
                               ) : (
                                 <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
                                   {teamJobs.map((job, jobIndex) => {
+                                    // Get travel info to next job
                                     const nextJob = teamJobs[jobIndex + 1];
                                     const travelKey = `${date}_${team.id}`;
                                     const travelData = calendarTravelTimes[travelKey]?.[jobIndex];
-                                    const isDragging = draggedJob?.job?.id === job.id;
-                                    const isDropTarget = dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === jobIndex;
-
+                                    
                                     return (
                                       <React.Fragment key={job.id}>
-                                        {/* Drop zone above job */}
-                                        {draggedJob && !job.isBreak && (
-                                          <div
-                                            onDragOver={(e) => handleDragOver(e, date, team.id, jobIndex)}
-                                            onDrop={(e) => handleDrop(e, date, team.id, jobIndex)}
-                                            style={{ height: isDropTarget ? 32 : 4, background: isDropTarget ? T.primaryLight : "transparent", borderRadius: 4, border: isDropTarget ? `2px dashed ${T.primary}` : "none", transition: "all 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
-                                          >
-                                            {isDropTarget && <span style={{ fontSize: 10, color: T.primaryDark, fontWeight: 700 }}>Drop here</span>}
-                                          </div>
-                                        )}
                                         <div
-                                          draggable={!job.isBreak}
-                                          onDragStart={(e) => handleDragStart(e, job, date, team.id)}
-                                          onDragEnd={handleDragEnd}
                                           onClick={() => !job.isBreak && setEditingJob(job)}
                                           style={{
                                             padding: "8px 10px",
-                                            background: isDragging
-                                              ? "transparent"
-                                              : job.isBreak
-                                              ? T.accentLight
-                                              : job.status === "completed"
-                                              ? "#D4EDDA"
-                                              : `${team.color}15`,
-                                            borderLeft: job.isBreak
-                                              ? `3px solid ${T.accent}`
+                                            background: job.isBreak 
+                                              ? T.accentLight 
+                                              : job.status === "completed" 
+                                                ? "#D4EDDA" 
+                                                : `${team.color}15`,
+                                            borderLeft: job.isBreak 
+                                              ? `3px solid ${T.accent}` 
                                               : `3px solid ${team.color}`,
                                             borderRadius: "0 6px 6px 0",
-                                            cursor: job.isBreak ? "default" : "grab",
+                                            cursor: job.isBreak ? "default" : "pointer",
                                             transition: "all 0.15s",
-                                            opacity: isDragging ? 0.3 : 1,
-                                            border: isDragging ? `2px dashed ${T.border}` : undefined,
                                           }}
                                         >
-                                          <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2, display: "flex", alignItems: "center", gap: 4 }}>
-                                            {!job.isBreak && <span style={{ fontSize: 9, color: T.textLight, cursor: "grab" }}>⠿</span>}
+                                          <div style={{ fontWeight: 700, fontSize: 12, color: job.isBreak ? "#8B6914" : T.text, marginBottom: 2 }}>
                                             {job.isBreak ? "🍴 Lunch Break" : job.clientName}
                                           </div>
                                           <div style={{ fontSize: 10, color: T.textMuted }}>
@@ -2640,10 +2752,19 @@ export default function Dashboard() {
                                             </div>
                                           )}
                                         </div>
-
-                                        {/* Travel time indicator */}
+                                        
+                                        {/* Travel time indicator to next job */}
                                         {nextJob && (
-                                          <div style={{ padding: "4px 10px 4px 14px", fontSize: 9, color: T.textLight, display: "flex", alignItems: "center", gap: 4, borderLeft: `3px solid ${T.border}` }}>
+                                          <div style={{ 
+                                            padding: "4px 10px 4px 14px", 
+                                            fontSize: 9, 
+                                            color: T.textLight,
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 4,
+                                            borderLeft: `3px solid ${T.border}`,
+                                            marginLeft: 0,
+                                          }}>
                                             {travelData ? (
                                               <>
                                                 <span>↓</span>
@@ -2662,14 +2783,6 @@ export default function Dashboard() {
                                       </React.Fragment>
                                     );
                                   })}
-                                  {/* Drop zone at bottom of list */}
-                                  {draggedJob && (
-                                    <div
-                                      onDragOver={(e) => handleDragOver(e, date, team.id, teamJobs.length)}
-                                      onDrop={(e) => handleDrop(e, date, team.id, teamJobs.length)}
-                                      style={{ height: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === teamJobs.length ? 32 : 4, background: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === teamJobs.length ? T.primaryLight : "transparent", borderRadius: 4, border: dragOverSlot?.date === date && dragOverSlot?.teamId === team.id && dragOverSlot?.index === teamJobs.length ? `2px dashed ${T.primary}` : "none", transition: "all 0.15s" }}
-                                    />
-                                  )}
                                 </div>
                               )}
                             </div>
@@ -2678,10 +2791,7 @@ export default function Dashboard() {
                         
                         {/* Add Job Button */}
                         <button
-                          onClick={() => {
-                            setSuburbSuggestion(null);
-                            setEditingJob({ date, teamId: scheduleSettings.teams[0].id, isNew: true });
-                          }}
+                          onClick={() => setEditingJob({ date, teamId: scheduleSettings.teams[0].id, isNew: true })}
                           style={{ width: "100%", padding: "6px", borderRadius: 6, border: `1.5px dashed ${T.border}`, background: "transparent", fontSize: 11, color: T.textMuted, cursor: "pointer", marginTop: 4 }}
                         >
                           + Add Job
@@ -3180,6 +3290,22 @@ export default function Dashboard() {
           }}
           onDelete={editingScheduleClient.id ? () => deleteScheduleClient(editingScheduleClient.id) : null}
           onClose={() => setEditingScheduleClient(null)}
+        />
+      )}
+
+      {/* Invoice Modal */}
+      {showInvoiceModal && (
+        <InvoiceModal
+          job={showInvoiceModal}
+          client={scheduleClients.find(c => c.id === showInvoiceModal.clientId)}
+          pricing={pricing}
+          onGenerate={(invoice) => {
+            const newInvoice = addInvoice(invoice);
+            setInvoices(loadInvoices());
+            setShowInvoiceModal(null);
+            showToast(`✅ Invoice ${newInvoice.invoiceNumber} created`);
+          }}
+          onClose={() => setShowInvoiceModal(null)}
         />
       )}
 
@@ -3813,57 +3939,6 @@ function EditJobModal({ job, clients, settings, onSave, onDelete, onClose }) {
           </div>
         )}
 
-        {/* Suburb stacking suggestion — only for new jobs with a date + client selected */}
-        {job.isNew && local.date && selectedClient && (() => {
-          // Compute suggestion inline using suburb coords from SUBURB_COORDS
-          const SUBURB_COORDS_LOCAL = {
-            "Twin Waters": { lat: -26.6275, lng: 153.0853 }, "Maroochydore": { lat: -26.6590, lng: 153.0997 },
-            "Kuluin": { lat: -26.6567, lng: 153.0486 }, "Forest Glen": { lat: -26.6833, lng: 153.0167 },
-            "Mons": { lat: -26.7167, lng: 153.0333 }, "Buderim": { lat: -26.6844, lng: 153.0500 },
-            "Alexandra Headland": { lat: -26.6678, lng: 153.1031 }, "Mooloolaba": { lat: -26.6817, lng: 153.1192 },
-            "Mountain Creek": { lat: -26.6933, lng: 153.0972 }, "Minyama": { lat: -26.6833, lng: 153.1167 },
-          };
-          const haversine = (a, b) => {
-            const R = 6371;
-            const dLat = (b.lat - a.lat) * Math.PI / 180;
-            const dLon = (b.lng - a.lng) * Math.PI / 180;
-            const aa = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
-            return R * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1-aa)) * 1.3;
-          };
-          const dayJobs = clients.filter(c => c.status === "active"); // We check via IDs below
-          // Get suburb of selected client
-          const clientSuburb = selectedClient.suburb;
-          const coordA = SUBURB_COORDS_LOCAL[clientSuburb] || { lat: -26.659, lng: 153.0997 };
-          // Check sameday same suburb in external jobs (not available here, skip)
-          // Show a simple area match tip based on the areaSchedule
-          const areaSchedule = settings.areaSchedule;
-          let matchedDay = null;
-          for (const [day, suburbs] of Object.entries(areaSchedule)) {
-            if (suburbs.some(s => s.toLowerCase() === clientSuburb.toLowerCase())) {
-              matchedDay = day;
-              break;
-            }
-          }
-          const selectedDateDay = new Date(local.date).toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
-          if (matchedDay && matchedDay !== selectedDateDay) {
-            return (
-              <div style={{ background: "#FFF8E7", borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.accent}`, fontSize: 12 }}>
-                <span style={{ fontWeight: 700, color: "#8B6914" }}>💡 Suburb suggestion: </span>
-                <span style={{ color: "#8B6914" }}>{clientSuburb} is usually scheduled on <strong>{matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s</strong> — moving this job there would improve route efficiency.</span>
-              </div>
-            );
-          }
-          if (matchedDay && matchedDay === selectedDateDay) {
-            return (
-              <div style={{ background: T.primaryLight, borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.primary}`, fontSize: 12 }}>
-                <span style={{ fontWeight: 700, color: T.primaryDark }}>✅ Great stacking! </span>
-                <span style={{ color: T.primaryDark }}>{clientSuburb} is already scheduled on {matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s — this job fits perfectly.</span>
-              </div>
-            );
-          }
-          return null;
-        })()}
-
         <div style={{ display: "flex", gap: 10 }}>
           {onDelete && (
             <button onClick={onDelete} style={{ padding: "12px 18px", borderRadius: T.radiusSm, border: "none", background: "#FDF0EF", color: T.danger, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
@@ -3994,36 +4069,6 @@ function EditScheduleClientModal({ client, settings, onSave, onDelete, onClose }
             </select>
           </div>
         </div>
-
-        {/* Suburb stacking suggestion */}
-        {isNew && local.suburb && (() => {
-          const areaSchedule = settings.areaSchedule;
-          let matchedDay = null;
-          for (const [day, suburbs] of Object.entries(areaSchedule)) {
-            if (suburbs.some(s => s.toLowerCase() === local.suburb.toLowerCase())) {
-              matchedDay = day;
-              break;
-            }
-          }
-          const selectedDay = local.preferredDay;
-          if (matchedDay && matchedDay !== selectedDay) {
-            return (
-              <div style={{ background: "#FFF8E7", borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.accent}`, fontSize: 12 }}>
-                <span style={{ fontWeight: 700, color: "#8B6914" }}>💡 Suburb tip: </span>
-                <span style={{ color: "#8B6914" }}>{local.suburb} is grouped on <strong>{matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s</strong> for efficient routing. Consider setting Preferred Day to match.</span>
-              </div>
-            );
-          }
-          if (matchedDay && matchedDay === selectedDay) {
-            return (
-              <div style={{ background: T.primaryLight, borderRadius: T.radiusSm, padding: "10px 14px", borderLeft: `3px solid ${T.primary}`, fontSize: 12 }}>
-                <span style={{ fontWeight: 700, color: T.primaryDark }}>✅ Perfect fit! </span>
-                <span style={{ color: T.primaryDark }}>{local.suburb} is already clustered on {matchedDay.charAt(0).toUpperCase() + matchedDay.slice(1)}s — this client will stack well with the existing route.</span>
-              </div>
-            );
-          }
-          return null;
-        })()}
 
         {/* Duration */}
         <div style={{ background: T.bg, borderRadius: T.radiusSm, padding: "14px 16px" }}>
@@ -4229,5 +4274,208 @@ function EmailPreviewComponent({ templateType, customStyle, customContent, recip
         <p style={{ margin: "6px 0 0", fontSize: 11, color: "#A3B5AD" }}>Dust Bunnies Cleaning · Sunshine Coast, QLD</p>
       </div>
     </div>
+  );
+}
+
+// ─── Invoice Modal Component ───
+function InvoiceModal({ job, client, pricing, onGenerate, onClose }) {
+  const [invoiceDetails, setInvoiceDetails] = useState({
+    description: `Cleaning service - ${job.suburb}`,
+    amount: job.price || 0,
+    notes: "",
+    dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0], // 7 days from now
+  });
+
+  const handleGenerate = () => {
+    const invoice = {
+      jobId: job.id,
+      clientId: job.clientId,
+      clientName: job.clientName,
+      clientEmail: client?.email || "",
+      clientAddress: client?.address || job.suburb,
+      serviceDate: job.date,
+      description: invoiceDetails.description,
+      amount: invoiceDetails.amount,
+      notes: invoiceDetails.notes,
+      dueDate: invoiceDetails.dueDate,
+    };
+    onGenerate(invoice);
+  };
+
+  const printInvoice = () => {
+    const invoiceNumber = `INV-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Invoice ${invoiceNumber}</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 40px; max-width: 800px; margin: 0 auto; color: #2C3E36; }
+          .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 40px; }
+          .logo { font-size: 24px; font-weight: 800; color: #4A9E7E; }
+          .logo-sub { font-size: 12px; color: #7A8F85; }
+          .invoice-title { text-align: right; }
+          .invoice-number { font-size: 24px; font-weight: 800; color: #2C3E36; }
+          .invoice-date { font-size: 14px; color: #7A8F85; }
+          .addresses { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-bottom: 40px; }
+          .address-block h3 { font-size: 11px; text-transform: uppercase; color: #7A8F85; margin: 0 0 8px; }
+          .address-block p { margin: 0; line-height: 1.6; }
+          .line-items { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
+          .line-items th { text-align: left; padding: 12px; background: #F4F8F6; font-size: 11px; text-transform: uppercase; color: #7A8F85; }
+          .line-items td { padding: 16px 12px; border-bottom: 1px solid #E2EBE6; }
+          .total-row { background: #E8F5EE; }
+          .total-row td { font-weight: 800; font-size: 18px; }
+          .notes { background: #F4F8F6; padding: 20px; border-radius: 8px; margin-bottom: 30px; }
+          .notes-title { font-size: 11px; text-transform: uppercase; color: #7A8F85; margin: 0 0 8px; }
+          .footer { text-align: center; color: #7A8F85; font-size: 12px; border-top: 1px solid #E2EBE6; padding-top: 20px; }
+          .due-date { background: #FFF8E7; padding: 12px 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }
+          @media print { body { padding: 20px; } }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div>
+            <div class="logo">🌿 Dust Bunnies Cleaning</div>
+            <div class="logo-sub">Eco-conscious cleaning · Sunshine Coast</div>
+          </div>
+          <div class="invoice-title">
+            <div class="invoice-number">${invoiceNumber}</div>
+            <div class="invoice-date">Date: ${new Date().toLocaleDateString("en-AU")}</div>
+          </div>
+        </div>
+
+        <div class="addresses">
+          <div class="address-block">
+            <h3>Bill To</h3>
+            <p><strong>${job.clientName}</strong><br>
+            ${client?.address || job.suburb}<br>
+            ${client?.email || ""}<br>
+            ${client?.phone || ""}</p>
+          </div>
+          <div class="address-block">
+            <h3>Service Details</h3>
+            <p>Service Date: ${new Date(job.date).toLocaleDateString("en-AU")}<br>
+            Location: ${job.suburb}<br>
+            Duration: ${job.duration} minutes</p>
+          </div>
+        </div>
+
+        <div class="due-date">
+          <strong>Payment Due:</strong> ${new Date(invoiceDetails.dueDate).toLocaleDateString("en-AU")}
+        </div>
+
+        <table class="line-items">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th style="text-align: right;">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>${invoiceDetails.description}</td>
+              <td style="text-align: right;">$${invoiceDetails.amount.toFixed(2)}</td>
+            </tr>
+            <tr class="total-row">
+              <td>Total Due</td>
+              <td style="text-align: right;">$${invoiceDetails.amount.toFixed(2)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        ${invoiceDetails.notes ? `
+        <div class="notes">
+          <div class="notes-title">Notes</div>
+          <p>${invoiceDetails.notes}</p>
+        </div>
+        ` : ''}
+
+        <div class="footer">
+          <p>Thank you for choosing Dust Bunnies! 💚</p>
+          <p>Payment can be made via bank transfer or cash</p>
+        </div>
+      </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.print();
+  };
+
+  return (
+    <Modal title="🧾 Generate Invoice" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {/* Client Info */}
+        <div style={{ background: T.bg, borderRadius: T.radiusSm, padding: "16px" }}>
+          <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 4 }}>{job.clientName}</div>
+          <div style={{ fontSize: 13, color: T.textMuted }}>
+            {client?.address || job.suburb}<br />
+            {client?.email && <span>{client.email}<br /></span>}
+            Service Date: {new Date(job.date).toLocaleDateString("en-AU")}
+          </div>
+        </div>
+
+        {/* Description */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>DESCRIPTION</label>
+          <input
+            type="text"
+            value={invoiceDetails.description}
+            onChange={e => setInvoiceDetails(prev => ({ ...prev, description: e.target.value }))}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+          />
+        </div>
+
+        {/* Amount & Due Date */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>AMOUNT ($)</label>
+            <input
+              type="number"
+              value={invoiceDetails.amount}
+              onChange={e => setInvoiceDetails(prev => ({ ...prev, amount: parseFloat(e.target.value) || 0 }))}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>DUE DATE</label>
+            <input
+              type="date"
+              value={invoiceDetails.dueDate}
+              onChange={e => setInvoiceDetails(prev => ({ ...prev, dueDate: e.target.value }))}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14 }}
+            />
+          </div>
+        </div>
+
+        {/* Notes */}
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, display: "block", marginBottom: 6 }}>NOTES (optional)</label>
+          <textarea
+            value={invoiceDetails.notes}
+            onChange={e => setInvoiceDetails(prev => ({ ...prev, notes: e.target.value }))}
+            placeholder="Any additional notes for the invoice..."
+            rows={3}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.border}`, fontSize: 14, resize: "vertical" }}
+          />
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={printInvoice}
+            style={{ flex: 1, padding: "14px", borderRadius: T.radiusSm, border: `1.5px solid ${T.border}`, background: "#fff", color: T.textMuted, fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+          >
+            🖨️ Print / PDF
+          </button>
+          <button
+            onClick={handleGenerate}
+            style={{ flex: 1, padding: "14px", borderRadius: T.radiusSm, border: "none", background: T.primary, color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+          >
+            ✅ Save Invoice
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

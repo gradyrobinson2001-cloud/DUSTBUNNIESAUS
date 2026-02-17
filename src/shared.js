@@ -16,6 +16,175 @@ export const SERVICED_AREAS = [
   "Buderim", "Alexandra Headland", "Mooloolaba", "Mountain Creek", "Minyama"
 ];
 
+// ─── Cleaner Portal PIN ───
+export const CLEANER_PIN = "1234"; // Change this to your preferred PIN
+
+// ─── Payment tracking ───
+export function loadPayments() {
+  try {
+    const stored = localStorage.getItem("db_payments");
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return [];
+}
+
+export function savePayments(payments) {
+  try {
+    localStorage.setItem("db_payments", JSON.stringify(payments));
+  } catch {}
+}
+
+export function addPayment(payment) {
+  const payments = loadPayments();
+  payments.unshift({
+    ...payment,
+    id: `payment_${Date.now()}`,
+    recordedAt: new Date().toISOString(),
+  });
+  savePayments(payments);
+  return payments;
+}
+
+export function getPaymentsForJob(jobId) {
+  return loadPayments().filter(p => p.jobId === jobId);
+}
+
+export function getPaymentsForClient(clientId) {
+  return loadPayments().filter(p => p.clientId === clientId);
+}
+
+export function getTotalOwed(jobs, payments) {
+  // Calculate total owed from completed jobs minus payments
+  const completedJobsTotal = jobs
+    .filter(j => j.status === "completed")
+    .reduce((sum, j) => sum + (j.price || 0), 0);
+  
+  const paymentsTotal = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+  
+  return completedJobsTotal - paymentsTotal;
+}
+
+// ─── Invoice tracking ───
+export function loadInvoices() {
+  try {
+    const stored = localStorage.getItem("db_invoices");
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return [];
+}
+
+export function saveInvoices(invoices) {
+  try {
+    localStorage.setItem("db_invoices", JSON.stringify(invoices));
+  } catch {}
+}
+
+export function addInvoice(invoice) {
+  const invoices = loadInvoices();
+  const invoiceNumber = `INV-${String(invoices.length + 1).padStart(4, '0')}`;
+  invoices.unshift({
+    ...invoice,
+    id: `invoice_${Date.now()}`,
+    invoiceNumber,
+    createdAt: new Date().toISOString(),
+    status: "unpaid",
+  });
+  saveInvoices(invoices);
+  return invoices[0];
+}
+
+// ─── Photo storage using IndexedDB ───
+const DB_NAME = "DustBunniesPhotos";
+const DB_VERSION = 1;
+const STORE_NAME = "photos";
+
+function openPhotoDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        const store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
+        store.createIndex("jobId", "jobId", { unique: false });
+        store.createIndex("date", "date", { unique: false });
+        store.createIndex("teamId", "teamId", { unique: false });
+      }
+    };
+  });
+}
+
+export async function savePhoto(photoData) {
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    
+    const photo = {
+      id: `photo_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      ...photoData,
+      uploadedAt: new Date().toISOString(),
+    };
+    
+    const request = store.add(photo);
+    request.onsuccess = () => resolve(photo);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getPhotosForJob(jobId) {
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const index = store.index("jobId");
+    const request = index.getAll(jobId);
+    
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getPhotosForDate(date) {
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const index = store.index("date");
+    const request = index.getAll(date);
+    
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getAllPhotos() {
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.getAll();
+    
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function deletePhoto(photoId) {
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME], "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.delete(photoId);
+    
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
 // ─── Suburb coordinates (fallback when no address) ───
 export const SUBURB_COORDS = {
   "Twin Waters": { lat: -26.6275, lng: 153.0853 },
